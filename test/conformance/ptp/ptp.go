@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -60,6 +61,68 @@ const (
 	rebootDaemonSetName          = "ptp-reboot"
 	rebootDaemonSetContainerName = "container-00"
 )
+
+type stubMapping map[string]interface{}
+
+var StrubStorage = stubMapping{}
+
+func init() {
+
+	StrubStorage = map[string]interface{}{
+		"longRunningTest1": longRunningTest1,
+		"longRunningTest2": longRunningTest2,
+	}
+}
+
+func executeTest(ctx context.Context, testName string, testParameters Configuration, fullConfig testconfig.TestConfig, wg *sync.WaitGroup) {
+
+	fmt.Println("executing for", ctx.Value("name"))
+
+	fmt.Println(testParameters, fullConfig)
+
+	if testName == "longRunningTest1" {
+		result1, _ := Call(testName, "max", "mustermann", testParameters, fullConfig)
+
+		outputStr1 := result1.(string)
+		fmt.Println(outputStr1)
+	} else if testName == "longRunningTest2" {
+		result2, _ := Call(testName, 100, testParameters, fullConfig)
+		outputStr2 := result2.(int)
+		fmt.Println(outputStr2)
+	}
+	wg.Done()
+}
+
+func Call(funcName string, params ...interface{}) (result interface{}, err error) {
+	f := reflect.ValueOf(StrubStorage[funcName])
+
+	if len(params) != f.Type().NumIn() {
+		err = errors.New("The number of params is out of index")
+		return
+	}
+
+	in := make([]reflect.Value, len(params))
+	for k, param := range params {
+		in[k] = reflect.ValueOf(param)
+	}
+
+	res := f.Call(in)
+	result = res[0].Interface()
+	return
+}
+
+func longRunningTest1(a, b string, testParameters Configuration, fullConfig testconfig.TestConfig) string {
+	time.Sleep(5 * time.Second)
+
+	fmt.Println("Inside the long running test", testParameters, " and the full config ", fullConfig)
+
+	return fmt.Sprintf("Done for %v, %v", a, b)
+}
+
+func longRunningTest2(val int, testParameters Configuration, fullConfig testconfig.TestConfig) int {
+	time.Sleep(200 * time.Millisecond)
+	return 10 * val
+}
 
 var _ = Describe("[ptp]", func() {
 	BeforeEach(func() {
@@ -140,7 +203,7 @@ var _ = Describe("[ptp]", func() {
 
 	Describe("PTP e2e tests", func() {
 		var ptpRunningPods []v1core.Pod
-		var fifoPriorities map[string]int64
+		// var fifoPriorities map[string]int64
 		var fullConfig testconfig.TestConfig
 
 		var testParameters Configuration
@@ -151,10 +214,9 @@ var _ = Describe("[ptp]", func() {
 			testParameters = getConfiguration()
 			//waitForPtpDaemonToBeReady()
 			restartPtpDaemon()
-
 		})
 
-		Context("PTP Reboot discovery", func() {
+		/*Context("PTP Reboot discovery", func() {
 
 			BeforeEach(func() {
 				if fullConfig.Status == testconfig.DiscoveryFailureStatus {
@@ -171,10 +233,10 @@ var _ = Describe("[ptp]", func() {
 					Skip("Skipping the reboot test")
 				}
 			})
-		})
+		})*/
 
 		Context("PTP Interfaces discovery", func() {
-			BeforeEach(func() {
+			/*BeforeEach(func() {
 				if fullConfig.Status == testconfig.DiscoveryFailureStatus {
 					Skip("Failed to find a valid ptp slave configuration")
 				}
@@ -415,9 +477,42 @@ var _ = Describe("[ptp]", func() {
 
 				logrus.Infof("Discovered master ptp config %s", ptpConfig.DiscoveredMasterPtpConfig.String())
 				logrus.Infof("Discovered slave ptp config %s", ptpConfig.DiscoveredSlavePtpConfig.String())
+			})*/
+
+			It("continuous-test-a-testing", func() {
+
+				logrus.Debug("soak-testing started")
+
+				logrus.Info("config=", testParameters)
+				//
+				if fullConfig.Status == testconfig.DiscoveryFailureStatus {
+					Fail("Failed to find a valid ptp slave configuration")
+				}
+
+				var wg sync.WaitGroup
+
+				const f1 = "longRunningTest1"
+
+				ctx := context.Background()
+				ctx = context.WithValue(ctx, "name", f1)
+
+				wg.Add(1)
+				go executeTest(ctx, f1, testParameters, fullConfig, &wg)
+				wg.Wait()
 			})
 
-			It("continuous-offset-testing", func() {
+			It("continuous-test-b-testing", func() {
+				var wg sync.WaitGroup
+				const f2 = "longRunningTest2"
+
+				ctx := context.Background()
+				ctx = context.WithValue(ctx, "name", f2)
+				wg.Add(1)
+				go executeTest(ctx, f2, testParameters, fullConfig, &wg)
+				wg.Wait()
+			})
+
+			/*It("continuous-offset-testing", func() {
 				logrus.Debug("soak-testing started")
 
 				logrus.Info("config=", testParameters)
@@ -433,9 +528,9 @@ var _ = Describe("[ptp]", func() {
 					logrus.Error("Can't list slave nodes")
 					Fail("Can't list slave nodes")
 				}
-		
+
 				var slavePods []v1.Pod
-		
+
 				for _, s := range slaveNodes.Items {
 					ptpPods, err := client.Client.CoreV1().Pods(PtpLinuxDaemonNamespace).List(context.Background(),
 						metav1.ListOptions{LabelSelector: "app=linuxptp-daemon", FieldSelector: fmt.Sprintf("spec.nodeName=%s", s.Name)})
@@ -445,7 +540,7 @@ var _ = Describe("[ptp]", func() {
 					}
 					slavePods = append(slavePods, ptpPods.Items...)
 				}
-		
+
 				if len(slavePods) == 0 {
 					logrus.Error("No slave pod found")
 					Fail("no slave pods found")
@@ -489,7 +584,7 @@ var _ = Describe("[ptp]", func() {
 				if asyncCounter != 0 {
 					Fail("Error found in master offset sync, please check the logs")
 				}
-			})
+			})*/
 		})
 
 		Context("PTP metric is present", func() {
@@ -540,7 +635,7 @@ var _ = Describe("[ptp]", func() {
 			})
 		})
 
-		Context("Running with event enabled", func() {
+		/*Context("Running with event enabled", func() {
 			ptpSlaveRunningPods := []v1core.Pod{}
 			BeforeEach(func() {
 				if !ptpEventEnabled() {
@@ -665,7 +760,7 @@ var _ = Describe("[ptp]", func() {
 				Expect(fifoPriorities).To(HaveLen(0))
 			})
 
-		})
+		})*/
 	})
 })
 
