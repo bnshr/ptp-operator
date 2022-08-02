@@ -93,6 +93,133 @@ func executeTest(ctx context.Context, testName string, testParameters Configurat
 	wg.Done()
 }
 
+func getMaxVal(durations []int64) int64 {
+	var max int64 = -1
+	for _, val := range durations {
+		if max < val {
+			max = val
+		}
+	}
+	return max
+}
+
+func executeTest1(testParameters Configuration, errMessages chan string, wg *sync.WaitGroup, mu sync.Mutex) {
+	ctx, _ := context.WithTimeout(context.Background(), time.Duration(testParameters.TestAContinuousConfig.Duration)*time.Minute)
+	ticker := time.NewTicker(time.Minute) // time given for execution for each iteration of the test
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fmt.Println("could not finish")
+			errMessages <- fmt.Sprintf("TestAContinuousConfig: time out happened")
+		default:
+			fmt.Println("Doing task A at ", time.Now())
+			time.Sleep(1 * time.Second)
+			// actual work
+			// any other error processing, then send message
+			// errMessages <- fmt.Sprintf("TestAContinuousConfig: some other issues")
+		}
+	}
+}
+
+func executeTest2(testParameters Configuration, errMessages chan string, wg *sync.WaitGroup, mu sync.Mutex) {
+	ctx, _ := context.WithTimeout(context.Background(), time.Duration(testParameters.TestBContinuousConfig.Duration)*time.Minute)
+	ticker := time.NewTicker(time.Minute)
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-ticker.C:
+		errMessages <- fmt.Sprintf("TestBContinuousConfig: time out happened")
+	default:
+		fmt.Println("Doing task for test B")
+		time.Sleep(2 * time.Minute)
+		// actual work
+		// any other error processing, then send message
+		// errMessages <- fmt.Sprintf("TestAContinuousConfig: some other issues")
+	}
+
+}
+
+func executeTests(testParameters Configuration, fullConfig testconfig.TestConfig) {
+
+	var testDurations []int64
+
+	if testParameters.MasterOffsetContinuousConfig.Enable {
+		testDurations = append(testDurations, testParameters.MasterOffsetContinuousConfig.Duration)
+	} else if testParameters.TestAContinuousConfig.Enable {
+		testDurations = append(testDurations, testParameters.TestAContinuousConfig.Duration)
+		// ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testParameters.TestAContinuousConfig.Duration))
+
+	} else if testParameters.TestBContinuousConfig.Enable {
+		testDurations = append(testDurations, testParameters.TestBContinuousConfig.Duration)
+	}
+
+	maxDuration := time.Duration(getMaxVal(testDurations)) * time.Minute
+	fmt.Println(maxDuration)
+
+	var mu sync.Mutex
+	asyncCounter := 0
+	var wg sync.WaitGroup // global
+
+	ticker := time.NewTicker(maxDuration)
+	errMessages := make(chan string)
+
+	if testParameters.TestAContinuousConfig.Enable {
+		testDurations = append(testDurations, testParameters.TestAContinuousConfig.Duration)
+		// ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testParameters.TestAContinuousConfig.Duration))
+		wg.Add(1)
+		go executeTest1(testParameters, errMessages, &wg, mu)
+		defer wg.Done()
+	} else if testParameters.TestBContinuousConfig.Enable {
+		testDurations = append(testDurations, testParameters.TestBContinuousConfig.Duration)
+		go executeTest2(testParameters, errMessages, &wg, mu)
+		defer wg.Done()
+	}
+
+	_, cancel := context.WithTimeout(context.Background(), maxDuration)
+
+failFastControlLabel:
+	for {
+		select {
+		case msg := <-errMessages:
+
+			test := strings.Split(msg, ":")[0]
+			fmt.Println("The test that failed is", test)
+
+			if test == "TestAContinuousConfig" {
+				if testParameters.TestAContinuousConfig.FailFast {
+					cancel()
+					Fail(msg)
+					break failFastControlLabel
+				} else {
+					logrus.Error(msg)
+					asyncCounter++
+				}
+			} else if test == "TestBContinuousConfig" {
+				if testParameters.TestBContinuousConfig.FailFast {
+					cancel()
+					Fail(msg)
+					break failFastControlLabel
+				} else {
+					logrus.Error(msg)
+					asyncCounter++
+				}
+			}
+		case <-ticker.C:
+			logrus.Info("test duration ended")
+			cancel()
+			break failFastControlLabel
+		}
+	}
+	wg.Wait()
+	if asyncCounter != 0 {
+		Fail("Error found in master offset sync, please check the logs")
+	}
+}
+
 func Call(funcName string, params ...interface{}) (result interface{}, err error) {
 	f := reflect.ValueOf(StrubStorage[funcName])
 
@@ -478,6 +605,15 @@ var _ = Describe("[ptp]", func() {
 				logrus.Infof("Discovered master ptp config %s", ptpConfig.DiscoveredMasterPtpConfig.String())
 				logrus.Infof("Discovered slave ptp config %s", ptpConfig.DiscoveredSlavePtpConfig.String())
 			})*/
+
+			It("banashris-soak-testing", func() {
+				logrus.Info("Banashri started the soak testing")
+				logrus.Info("config=", testParameters)
+
+				executeTests(testParameters, fullConfig)
+
+				logrus.Info("Banashri ended the soak testing")
+			})
 
 			It("continuous-test-a-testing", func() {
 

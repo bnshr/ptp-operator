@@ -10,9 +10,9 @@ rebootSlaveNode:
   duration: 10
 testacontinuous:
   enable: true 
-  failfast : true 
-  duration : 10
+  failfast : false 
+  duration : 2
 testbcontinuous:
   enable: true 
   failfast : true 
-  duration : 10
+  duration : 5
