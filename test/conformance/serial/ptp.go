@@ -4191,6 +4191,15 @@ func waitForWPCGMReady(fullConfig testconfig.TestConfig) {
 	if fullConfig.DiscoveredGrandMasterPtpConfig == nil {
 		return
 	}
+	// Only WPC GM topologies (TelcoGMBC, TelcoGMOC, standalone TGM) converge
+	// dynamically to clock class 6. Regular BC/OC grandmasters use a hardcoded
+	// clock class and must not be blocked on this wait.
+	switch fullConfig.PtpModeDiscovered {
+	case testconfig.TelcoGrandMasterClock, testconfig.TelcoGMOC, testconfig.TelcoGMBC:
+		// fall through to wait
+	default:
+		return
+	}
 	By("Waiting for WPC T-GM to reach clock class 6 (LOCKED)")
 	gmPod := getGMPod()
 	Eventually(func() bool {
