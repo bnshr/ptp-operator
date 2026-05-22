@@ -66,7 +66,8 @@ if [[ "$RUN_PHASE" == "all" ]]; then
     ./create-local-registry.sh "$VM_IP"
 
     cd ../ptp-tools
-    make podman-build-and-pushall
+    make podman-cleanall
+    make podman-buildpushall
     cd -
 
 fi
