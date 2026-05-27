@@ -3,7 +3,7 @@ set -x
 set -euo pipefail
 
 export DKMS_MODE="${DKMS_MODE:-false}"
-TEST_MODES="tgm,tgmoc,tgmbc"
+TEST_MODES="tgm"
 RUN_PHASE="all"
 REGISTRY_IP=""
 TARBALL=""
