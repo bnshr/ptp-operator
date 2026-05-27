@@ -557,6 +557,13 @@ func createPtpConfigurations(ctx context.Context) error {
 		ptphelper.ApplyIntegratedGnssSimWPCPCIOverlay()
 	}
 
+	for _, p := range config.GetPtpIfList() {
+		logrus.Infof("L2 iface %s node=%s PhcIndex=%d HasPtpPins=%t GnssDevice=%q Subsystem=%q Device=%q",
+			p.InterfaceName, p.NodeName,
+			p.IfPTPCaps.PhcIndex, p.IfPTPCaps.HasPtpPins, p.IfPTPCaps.GnssDevice,
+			p.IfPci.Subsystem, p.IfPci.Device)
+	}
+
 	if GlobalConfig.PtpModeDesired != Discovery {
 		// initialize L2 config in solver
 		solver.GlobalConfig.SetL2Config(config)

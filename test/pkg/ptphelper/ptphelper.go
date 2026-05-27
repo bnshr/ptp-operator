@@ -1591,6 +1591,16 @@ func ApplyIntegratedGnssSimWPCPCIOverlay() {
 			return
 		}
 		p.IfPci.Subsystem = wpcSubsystem + " (gnss-sim CI)"
+		// IsWPCNicWrapper requires HasPtpPins=true (checked via same-PhcIndex peers).
+		// The L2 discovery pod does not detect netdevsim PTP pins, so complete the
+		// WPC capability overlay here so the graph solver's StepIsWPCNic can pass.
+		p.IfPTPCaps.HasPtpPins = true
+		if p.IfPTPCaps.GnssDevice == "" {
+			p.IfPTPCaps.GnssDevice = envOrDefault("GNSS_SIM_NMEA_DEVICE", "ttyGNSS_TS2PHC")
+		}
+		if p.IfPTPCaps.PhcIndex < 0 {
+			p.IfPTPCaps.PhcIndex = 0
+		}
 	}
 	for _, p := range l2lib.GlobalL2DiscoveryConfig.PtpIfList {
 		patch(p)
