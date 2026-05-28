@@ -957,7 +957,13 @@ func CreatePtpConfigWPCGrandMaster(policyName string, nodeName string, ifList []
 	}
 
 	ts2phcConfig := BaseTs2PhcConfig + fmt.Sprintf("\nts2phc.nmea_serialport  /dev/%s\n", deviceID)
-	ts2phcConfig = fmt.Sprintf("%s\n[%s]\nts2phc.extts_polarity rising\nts2phc.extts_correction 0\n", ts2phcConfig, ifList[0])
+	if ptphelper.UseGnssSimulation() {
+		// gnss-sim provides NMEA only — no hardware PPS extts signal is generated.
+		// Omit extts_polarity so ts2phc syncs the PHC from NMEA without waiting for a PPS edge.
+		ts2phcConfig = fmt.Sprintf("%s\n[%s]\n", ts2phcConfig, ifList[0])
+	} else {
+		ts2phcConfig = fmt.Sprintf("%s\n[%s]\nts2phc.extts_polarity rising\nts2phc.extts_correction 0\n", ts2phcConfig, ifList[0])
+	}
 	ptp4lConfig := GetPtp4lConfigWithAuth(BasePtp4lConfig) + "boundary_clock_jbod 1\n"
 	ptp4lConfig = AddAuthSettings(AddInterface(ptp4lConfig, ifList[0], 1))
 	ptp4lConfig = AddAuthSettings(AddInterface(ptp4lConfig, ifList[1], 1))

@@ -2896,6 +2896,8 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					Skip("simulated T-GM config was not discovered as TelcoGrandMasterClock")
 				}
 
+				checkClockClassState(fullConfig, strconv.Itoa(int(fbprotocol.ClockClass6)), pkg.TimeoutIn5Minutes)
+
 				gmPod := getGMPod()
 				nodeName := gmPod.Spec.NodeName
 				if nodeName != "" {
