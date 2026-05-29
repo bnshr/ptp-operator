@@ -1560,6 +1560,7 @@ func ApplyIntegratedGnssSimWPCPCIOverlay() {
 			return
 		}
 		p.IfPci.Subsystem = wpcSubsystem + " (gnss-sim CI)"
+		p.IfPTPCaps.HasPtpPins = true
 	}
 	for _, p := range l2lib.GlobalL2DiscoveryConfig.PtpIfList {
 		patch(p)
