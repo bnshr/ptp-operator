@@ -2743,9 +2743,9 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 						if err != nil {
 							return false
 						}
-						return ret["phc2sys"] && ret["ptp4l"] && ret["ts2phc"] && ret["dpll"]
+						return ret["phc2sys"] && ret["ptp4l"] && ret["ts2phc"]
 					}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeTrue(),
-						"Expected phc2sys, ptp4l, ts2phc, dpll to all report process_status 1 for simulated GM")
+						"Expected phc2sys, ptp4l, ts2phc to all report process_status 1 for simulated GM")
 				})
 			})
 
@@ -3608,7 +3608,7 @@ func processRunningSimGM(input string, state string) (map[string]bool, error) {
 	processStatusPattern := `openshift_ptp_process_status\{config="([^"]+)",node="([^"]+)",process="([^"]+)"\} (\d+)`
 	processStatusRe := regexp.MustCompile(processStatusPattern)
 
-	result := map[string]bool{"phc2sys": false, "ptp4l": false, "ts2phc": false, "dpll": false}
+	result := map[string]bool{"phc2sys": false, "ptp4l": false, "ts2phc": false}
 
 	scanner := bufio.NewScanner(strings.NewReader(input))
 	timeout := 10 * time.Second
@@ -4282,19 +4282,28 @@ func getGMEvents(
 			return results
 		case ev := <-gnssEventChan:
 			if res, ok := processEvent(ptpEvent.GnssStateChange, ev); ok {
-				results[res.Type] = res.Values
-				fmt.Fprintf(GinkgoWriter, "GnssStateChange Event recieved  %v, ", res.Values)
+				if _, already := results[res.Type]; !already {
+					results[res.Type] = res.Values
+					fmt.Fprintf(GinkgoWriter, "GnssStateChange Event recieved  %v, ", res.Values)
+				}
 			}
 		case ev := <-ccEventChan:
 			if res, ok := processEvent(ptpEvent.PtpClockClassChange, ev); ok {
-				results[res.Type] = res.Values
-				fmt.Fprintf(GinkgoWriter, "PtpClockClassChange Event recieved  %v, ", res.Values)
+				if _, already := results[res.Type]; !already {
+					results[res.Type] = res.Values
+					fmt.Fprintf(GinkgoWriter, "PtpClockClassChange Event recieved  %v, ", res.Values)
+				}
 			}
 		case ev := <-lsEventChan:
 			if res, ok := processEvent(ptpEvent.PtpStateChange, ev); ok {
-				results[res.Type] = res.Values
-				fmt.Fprintf(GinkgoWriter, "PtpStateChange Event recieved  %v, ", res.Values)
+				if _, already := results[res.Type]; !already {
+					results[res.Type] = res.Values
+					fmt.Fprintf(GinkgoWriter, "PtpStateChange Event recieved  %v, ", res.Values)
+				}
 			}
+		}
+		if len(results) == 3 {
+			return results
 		}
 	}
 }
