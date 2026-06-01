@@ -4265,7 +4265,10 @@ func processEvent(eventType ptpEvent.EventType, ev exports.StoredEvent) (*EventR
 	return &EventResult{Type: eventType, Values: values}, true
 }
 
-// getEvents listens and aggregates events into a map until stopChan is closed
+// getGMEvents listens and aggregates events into a map, keeping the latest
+// event for each type. It always waits for the full timeout so that stale
+// initial events (pushed by PushInitialEvent) are overwritten by real
+// transition events.
 func getGMEvents(
 	gnssEventChan <-chan exports.StoredEvent,
 	ccEventChan <-chan exports.StoredEvent,
@@ -4282,28 +4285,19 @@ func getGMEvents(
 			return results
 		case ev := <-gnssEventChan:
 			if res, ok := processEvent(ptpEvent.GnssStateChange, ev); ok {
-				if _, already := results[res.Type]; !already {
-					results[res.Type] = res.Values
-					fmt.Fprintf(GinkgoWriter, "GnssStateChange Event recieved  %v, ", res.Values)
-				}
+				results[res.Type] = res.Values
+				fmt.Fprintf(GinkgoWriter, "GnssStateChange Event recieved  %v, ", res.Values)
 			}
 		case ev := <-ccEventChan:
 			if res, ok := processEvent(ptpEvent.PtpClockClassChange, ev); ok {
-				if _, already := results[res.Type]; !already {
-					results[res.Type] = res.Values
-					fmt.Fprintf(GinkgoWriter, "PtpClockClassChange Event recieved  %v, ", res.Values)
-				}
+				results[res.Type] = res.Values
+				fmt.Fprintf(GinkgoWriter, "PtpClockClassChange Event recieved  %v, ", res.Values)
 			}
 		case ev := <-lsEventChan:
 			if res, ok := processEvent(ptpEvent.PtpStateChange, ev); ok {
-				if _, already := results[res.Type]; !already {
-					results[res.Type] = res.Values
-					fmt.Fprintf(GinkgoWriter, "PtpStateChange Event recieved  %v, ", res.Values)
-				}
+				results[res.Type] = res.Values
+				fmt.Fprintf(GinkgoWriter, "PtpStateChange Event recieved  %v, ", res.Values)
 			}
-		}
-		if len(results) == 3 {
-			return results
 		}
 	}
 }
