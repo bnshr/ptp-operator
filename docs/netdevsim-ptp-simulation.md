@@ -261,9 +261,19 @@ only checking the first byte.
 | 6 | Estimated (DR) | 0x01 (Dead Reckoning) | 0x00 |
 | other | — | 0x03 (3D) | 0x0D |
 
-When `gpsFix < 2`, NAV-CLOCK `tAcc` is set to 999,999 ns instead of 10 ns.
-This causes the daemon's `isOffsetInRange()` check to also trigger FREERUN,
-matching real hardware behavior during signal loss.
+NAV-CLOCK `tAcc` reflects both GNSS fix state and DPLL lock status:
+
+| Condition | `tAcc` (ns) |
+|-----------|-------------|
+| `gpsFix >= 2` (valid fix) | 10 |
+| `gpsFix < 2`, DPLL in HOLDOVER | 10 |
+| `gpsFix < 2`, DPLL in UNLOCKED (freerun) | 999,999 |
+
+During HOLDOVER the oscillator is still in-spec, so `tAcc` stays low.
+This prevents the daemon's `isOffsetInRange()` check from bypassing the
+HOLDOVER state. Once the DPLL holdover timeout expires and transitions to
+UNLOCKED, `tAcc` spikes to 999,999 ns, matching real hardware behavior
+where the oscillator eventually drifts out of spec.
 
 ### 2.4 DPLL Notification Timer
 
@@ -347,11 +357,17 @@ sequenceDiagram
     Test->>Sim: POST /signal/loss
     Sim->>Kernel: $GNGGA,...,0,...  (fix quality = 0)
     Kernel->>Kernel: parse GGA -> gnss_gps_fix = 0
+    Kernel->>Kernel: DPLL: LOCKED → HOLDOVER
     Timer->>Kernel: NAV-STATUS gpsFix=0, flags=0x00
-    Timer->>Kernel: NAV-CLOCK tAcc=999999
+    Timer->>Kernel: NAV-CLOCK tAcc=10 (holdover, still in-spec)
     Kernel->>UBX: read gpsFix=0
-    UBX->>Daemon: GNSS FREERUN
-    Daemon->>Events: gnss-state-change (not synchronized)
+    UBX->>Daemon: GNSS HOLDOVER (CC7)
+    Daemon->>Events: ptp-state-change (HOLDOVER)
+    Note over Kernel: After holdover timeout (15s default)
+    Kernel->>Kernel: DPLL: HOLDOVER → UNLOCKED
+    Timer->>Kernel: NAV-CLOCK tAcc=999999 (out of spec)
+    UBX->>Daemon: GNSS FREERUN (CC248)
+    Daemon->>Events: ptp-state-change (FREERUN)
 
     Test->>Sim: POST /signal/restore
     Sim->>Kernel: $GNGGA,...,1,...  (fix quality = 1)

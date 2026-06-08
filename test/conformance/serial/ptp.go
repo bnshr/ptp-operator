@@ -3148,16 +3148,16 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				}, pkg.TimeoutIn3Minutes, 5*time.Second).Should(BeTrue(),
 					"Expected BC clock class to cascade to CC7 after GM holdover event")
 
+				term2, err2 := event.MonitorPodLogsRegex()
+				defer func() { stopMonitor(term2) }()
+				Expect(err2).ToNot(HaveOccurred())
+
 				By("Restoring GNSS signal via gnss-sim API")
 				simErr = ptphelper.GNSSSimSignalRestore()
 				Expect(simErr).ToNot(HaveOccurred())
 
 				By("Waiting for GM clock class recovery to CC6")
 				waitForClockClass(fullConfig, strconv.Itoa(int(fbprotocol.ClockClass6)))
-
-				term2, err2 := event.MonitorPodLogsRegex()
-				defer func() { stopMonitor(term2) }()
-				Expect(err2).ToNot(HaveOccurred())
 
 				events = getGMEvents(subs.GNSS, subs.CLOCKCLASS, subs.LOCKSTATE, 10*time.Second)
 				fmt.Fprintf(GinkgoWriter, "TGMBC GM recovery events: %v\n", events)
@@ -4231,18 +4231,27 @@ func processEvent(eventType ptpEvent.EventType, ev exports.StoredEvent) (*EventR
 	return &EventResult{Type: eventType, Values: values}, true
 }
 
-// getGMEvents listens and aggregates events into a map, keeping the latest
-// event for each type. It always waits for the full timeout so that stale
-// initial events (pushed by PushInitialEvent) are overwritten by real
-// transition events.
+func eventSource(ev exports.StoredEvent) string {
+	if src, ok := ev[exports.EventSource].(string); ok {
+		return src
+	}
+	return ""
+}
+
+// getGMEvents listens and collects all events per type. It always waits for
+// the full timeout so that stale initial events (pushed by PushInitialEvent)
+// are followed by real transition events. All events are kept so that
+// verification can check whether a particular state was ever observed,
+// regardless of later overwrites from other processes (e.g. BC ptp4l on the
+// same node sharing the same event source path).
 func getGMEvents(
 	gnssEventChan <-chan exports.StoredEvent,
 	ccEventChan <-chan exports.StoredEvent,
 	lsEventChan <-chan exports.StoredEvent,
 	timeout time.Duration,
-) map[ptpEvent.EventType]exports.StoredEventValues {
+) map[ptpEvent.EventType][]exports.StoredEventValues {
 
-	results := make(map[ptpEvent.EventType]exports.StoredEventValues)
+	results := make(map[ptpEvent.EventType][]exports.StoredEventValues)
 	timer := time.NewTimer(timeout)
 
 	for {
@@ -4250,46 +4259,49 @@ func getGMEvents(
 		case <-timer.C:
 			return results
 		case ev := <-gnssEventChan:
+			src := eventSource(ev)
 			if res, ok := processEvent(ptpEvent.GnssStateChange, ev); ok {
-				results[res.Type] = res.Values
-				fmt.Fprintf(GinkgoWriter, "GnssStateChange Event recieved  %v, ", res.Values)
+				fmt.Fprintf(GinkgoWriter, "GnssStateChange Event recieved  %v (source=%s), ", res.Values, src)
+				results[res.Type] = append(results[res.Type], res.Values)
 			}
 		case ev := <-ccEventChan:
+			src := eventSource(ev)
 			if res, ok := processEvent(ptpEvent.PtpClockClassChange, ev); ok {
-				results[res.Type] = res.Values
-				fmt.Fprintf(GinkgoWriter, "PtpClockClassChange Event recieved  %v, ", res.Values)
+				fmt.Fprintf(GinkgoWriter, "PtpClockClassChange Event recieved  %v (source=%s), ", res.Values, src)
+				results[res.Type] = append(results[res.Type], res.Values)
 			}
 		case ev := <-lsEventChan:
+			src := eventSource(ev)
 			if res, ok := processEvent(ptpEvent.PtpStateChange, ev); ok {
-				results[res.Type] = res.Values
-				fmt.Fprintf(GinkgoWriter, "PtpStateChange Event recieved  %v, ", res.Values)
+				fmt.Fprintf(GinkgoWriter, "PtpStateChange Event recieved  %v (source=%s), ", res.Values, src)
+				results[res.Type] = append(results[res.Type], res.Values)
 			}
 		}
 	}
 }
 
-// verifyEvent looks for a particular state (string) inside a slice of StoredEventValues
-func verifyEvent(events exports.StoredEventValues, expectedState ptpEvent.SyncState) {
-	found := false
-	if state, ok := events["notification"].(string); ok {
-		if state == string(expectedState) {
-			found = true
+// verifyEvent checks that at least one collected event carries the expected
+// notification state. Multiple processes (GM, BC) on the same node share the
+// same event source path, so we keep all observed values and verify the
+// expected state was seen at any point during the collection window.
+func verifyEvent(allEvents []exports.StoredEventValues, expectedState ptpEvent.SyncState) {
+	for _, ev := range allEvents {
+		if state, ok := ev["notification"].(string); ok && state == string(expectedState) {
+			return
 		}
 	}
-	Expect(found).To(BeTrue(),
-		"expected state %q not found in %+v", expectedState, events)
+	Fail(fmt.Sprintf("expected state %q not found in %d events: %+v", expectedState, len(allEvents), allEvents))
 }
 
-// verifyMetricThreshold checks if any event has metric within a range
-func verifyMetric(events exports.StoredEventValues, value float64) {
-	found := false
-	if metricValue, ok := events["metric"].(float64); ok {
-		if metricValue == value {
-			found = true
+// verifyMetric checks that at least one collected event carries the expected
+// metric value.
+func verifyMetric(allEvents []exports.StoredEventValues, value float64) {
+	for _, ev := range allEvents {
+		if metricValue, ok := ev["metric"].(float64); ok && metricValue == value {
+			return
 		}
 	}
-	Expect(found).To(BeTrue(),
-		"expected a metric [%f] but got %+v", value, events)
+	Fail(fmt.Sprintf("expected metric [%f] not found in %d events: %+v", value, len(allEvents), allEvents))
 }
 
 func stopMonitor(term chan bool) {
