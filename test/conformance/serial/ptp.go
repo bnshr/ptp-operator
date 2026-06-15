@@ -891,9 +891,6 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					!fullConfig.FoundSolutions[testconfig.AlgoTGMBCWithSlavesString] {
 					Skip("test only valid for Boundary clock in multi-node clusters with slaves")
 				}
-				if fullConfig.PtpModeDiscovered == testconfig.TelcoGMBC && ptphelper.IsGnssSimulatedCI() {
-					Skip("netdevsim virtual PHCs do not converge reliably for cross-node multi-hop sync (BC→OC)")
-				}
 				waitForWPCGMReady(fullConfig)
 				aLabel := pkg.PtpClockUnderTestNodeLabel
 				var masterIDBc1 string
@@ -1456,7 +1453,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 							pkg.EventProxyContainerName,
 							`starting v2 rest api server at port`,
 							true,
-							pkg.TimeoutIn1Minute,
+							30*time.Second,
 						)
 						Expect(err).NotTo(HaveOccurred(),
 							fmt.Sprintf("Failed to get logs from pod %s", pod.Name))
@@ -1517,7 +1514,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 							pkg.EventProxyContainerName,
 							`starting v2 rest api server at port`,
 							true,
-							pkg.TimeoutIn1Minute,
+							30*time.Second,
 						)
 						Expect(err).NotTo(HaveOccurred(),
 							fmt.Sprintf("Failed to get logs from pod %s", pod.Name))
