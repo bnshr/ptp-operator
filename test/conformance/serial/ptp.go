@@ -585,7 +585,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				if fullConfig.L2Config != nil && !isExternalMaster {
 					aLabel := pkg.PtpGrandmasterNodeLabel
 					gmPolicyName := pkg.PtpGrandMasterPolicyName
-					if fullConfig.DiscoveredGrandMasterPtpConfig != nil {
+					if fullConfig.PtpModeDiscovered == testconfig.TelcoGMOC || fullConfig.PtpModeDiscovered == testconfig.TelcoGMBC {
 						gmPolicyName = pkg.PtpWPCGrandMasterPolicyName
 					}
 					var aString string
