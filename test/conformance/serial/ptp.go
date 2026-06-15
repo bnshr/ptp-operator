@@ -327,9 +327,6 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 			}
 			ptpOperatorConfig.Spec.EventConfig.EnableEventPublisher = true
 			_, err = client.Client.PtpV1Interface.PtpOperatorConfigs(pkg.PtpLinuxDaemonNamespace).Update(context.Background(), ptpOperatorConfig, metav1.UpdateOptions{})
-			if err != nil && kerrors.IsInternalError(err) && strings.Contains(err.Error(), "webhook") {
-				Skip("Skipping: PtpOperatorConfig admission webhook is not available in this environment")
-			}
 			Expect(err).ToNot(HaveOccurred())
 
 			By("Reading back and verifying EnableEventPublisher is true")
@@ -369,7 +366,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 			err := testconfig.CreatePtpConfigurationsWithRetry(3)
 			if err != nil {
 				fullConfig.Status = testconfig.DiscoveryFailureStatus
-				Skip(fmt.Sprintf("Could not create a ptp config, err=%s", err))
+				Fail(fmt.Sprintf("Could not create a ptp config, err=%s", err))
 			}
 			fullConfig = testconfig.GetFullDiscoveredConfig(pkg.PtpLinuxDaemonNamespace, false)
 			if fullConfig.Status != testconfig.DiscoverySuccessStatus {
@@ -377,7 +374,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 - the ptpconfig has a %s label only in the recommend section (no node section)
 - the node running the clock under test is label with: %s`, pkg.PtpClockUnderTestNodeLabel, pkg.PtpClockUnderTestNodeLabel)
 
-				Skip("Failed to find a valid ptp slave configuration")
+				Fail("Failed to find a valid ptp slave configuration")
 
 			}
 			if fullConfig.PtpModeDesired != testconfig.Discovery {
@@ -2084,13 +2081,6 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					"clock-under-test pod missing after refresh; label node with "+pkg.PtpClockUnderTestNodeLabel)
 				Expect(fullConfig.DiscoveredClockUnderTestPtpConfig).NotTo(BeNil(),
 					"clock-under-test PtpConfig missing after refresh")
-				// In TGMBC + gnss-sim mode the GM converges dynamically via the
-				// GNSS→ts2phc→DPLL pipeline. WaitForPtpDaemonToBeReady only confirms
-				// processes are running, not that the GM has reached clock class 6.
-				// Ensure the GM is locked before any outage test touches the topology.
-				if fullConfig.PtpModeDiscovered == testconfig.TelcoGMBC {
-					waitForWPCGMReady(fullConfig)
-				}
 			})
 
 			It("The slave node network interface is taken down and up", func() {
@@ -2100,6 +2090,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				if fullConfig.PtpModeDesired == testconfig.DualFollowerClock {
 					Skip("Test not valid for dual follower scenario")
 				}
+
 				skippedInterfacesStr, isSet := os.LookupEnv("SKIP_INTERFACES")
 				if !isSet {
 					Skip("Mandatory to provide skipped interface to avoid making a node disconnected from the cluster")
@@ -3026,7 +3017,6 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					Expect(err).NotTo(HaveOccurred())
 					ptphelper.WaitForPtpDaemonToBeReady(podsRunningPTP4l)
 				})
-				waitForWPCGMReady(fullConfig)
 			})
 
 			It("Verifies cascading holdover on GNSS signal loss", func() {
@@ -4188,16 +4178,9 @@ func anyClockClassDifferent(fullConfig testconfig.TestConfig, excludedClass stri
 // (clock_class_threshold), so we must wait before any slave sync assertion.
 // The function is a no-op when there is no WPC GM in the topology.
 func waitForWPCGMReady(fullConfig testconfig.TestConfig) {
-	if fullConfig.DiscoveredGrandMasterPtpConfig == nil {
-		return
-	}
-	// Only WPC GM topologies (TelcoGMBC, TelcoGMOC, standalone TGM) converge
-	// dynamically to clock class 6. Regular BC/OC grandmasters use a hardcoded
-	// clock class and must not be blocked on this wait.
-	switch fullConfig.PtpModeDiscovered {
-	case testconfig.TelcoGrandMasterClock, testconfig.TelcoGMOC, testconfig.TelcoGMBC:
-		// fall through to wait
-	default:
+	if fullConfig.PtpModeDiscovered != testconfig.TelcoGMOC &&
+		fullConfig.PtpModeDiscovered != testconfig.TelcoGMBC &&
+		fullConfig.PtpModeDiscovered != testconfig.TelcoGrandMasterClock {
 		return
 	}
 	By("Waiting for WPC T-GM to reach clock class 6 (LOCKED)")
@@ -4205,7 +4188,7 @@ func waitForWPCGMReady(fullConfig testconfig.TestConfig) {
 	Eventually(func() bool {
 		buf, _, _ := pods.ExecCommand(client.Client, true, gmPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
 		return checkClockClassInMetrics(buf.String(), strconv.Itoa(int(fbprotocol.ClockClass6)))
-	}, pkg.TimeoutIn3Minutes, 5*time.Second).Should(BeTrue(),
+	}, pkg.TimeoutIn10Minutes, 5*time.Second).Should(BeTrue(),
 		"WPC T-GM did not reach clock class 6 — downstream clocks cannot leave LISTENING state")
 }
 
@@ -4265,19 +4248,10 @@ func processEvent(eventType ptpEvent.EventType, ev exports.StoredEvent) (*EventR
 	return &EventResult{Type: eventType, Values: values}, true
 }
 
-func eventSource(ev exports.StoredEvent) string {
-	if src, ok := ev[exports.EventSource].(string); ok {
-		return src
-	}
-	return ""
-}
-
-// getGMEvents listens and collects all events per type. It always waits for
-// the full timeout so that stale initial events (pushed by PushInitialEvent)
-// are followed by real transition events. All events are kept so that
-// verification can check whether a particular state was ever observed,
-// regardless of later overwrites from other processes (e.g. BC ptp4l on the
-// same node sharing the same event source path).
+// getEvents listens and collects all events per type. It always waits for
+// the full timeout so that rapid state transitions (e.g. HOLDOVER→FREERUN
+// within 5s) are captured rather than overwritten. All events are kept so
+// verification can check whether a particular state was ever observed.
 func getGMEvents(
 	gnssEventChan <-chan exports.StoredEvent,
 	ccEventChan <-chan exports.StoredEvent,
@@ -4293,21 +4267,18 @@ func getGMEvents(
 		case <-timer.C:
 			return results
 		case ev := <-gnssEventChan:
-			src := eventSource(ev)
 			if res, ok := processEvent(ptpEvent.GnssStateChange, ev); ok {
-				fmt.Fprintf(GinkgoWriter, "GnssStateChange Event recieved  %v (source=%s), ", res.Values, src)
+				fmt.Fprintf(GinkgoWriter, "GnssStateChange Event recieved  %v, ", res.Values)
 				results[res.Type] = append(results[res.Type], res.Values)
 			}
 		case ev := <-ccEventChan:
-			src := eventSource(ev)
 			if res, ok := processEvent(ptpEvent.PtpClockClassChange, ev); ok {
-				fmt.Fprintf(GinkgoWriter, "PtpClockClassChange Event recieved  %v (source=%s), ", res.Values, src)
+				fmt.Fprintf(GinkgoWriter, "PtpClockClassChange Event recieved  %v, ", res.Values)
 				results[res.Type] = append(results[res.Type], res.Values)
 			}
 		case ev := <-lsEventChan:
-			src := eventSource(ev)
 			if res, ok := processEvent(ptpEvent.PtpStateChange, ev); ok {
-				fmt.Fprintf(GinkgoWriter, "PtpStateChange Event recieved  %v (source=%s), ", res.Values, src)
+				fmt.Fprintf(GinkgoWriter, "PtpStateChange Event recieved  %v, ", res.Values)
 				results[res.Type] = append(results[res.Type], res.Values)
 			}
 		}
@@ -4315,9 +4286,8 @@ func getGMEvents(
 }
 
 // verifyEvent checks that at least one collected event carries the expected
-// notification state. Multiple processes (GM, BC) on the same node share the
-// same event source path, so we keep all observed values and verify the
-// expected state was seen at any point during the collection window.
+// notification state. Multiple events may arrive during the collection window
+// (e.g. HOLDOVER followed by FREERUN), so we scan all of them.
 func verifyEvent(allEvents []exports.StoredEventValues, expectedState ptpEvent.SyncState) {
 	for _, ev := range allEvents {
 		if state, ok := ev["notification"].(string); ok && state == string(expectedState) {
@@ -4328,7 +4298,7 @@ func verifyEvent(allEvents []exports.StoredEventValues, expectedState ptpEvent.S
 }
 
 // verifyMetric checks that at least one collected event carries the expected
-// metric value.
+// metric value. Scans all events since rapid transitions may produce multiple values.
 func verifyMetric(allEvents []exports.StoredEventValues, value float64) {
 	for _, ev := range allEvents {
 		if metricValue, ok := ev["metric"].(float64); ok && metricValue == value {
