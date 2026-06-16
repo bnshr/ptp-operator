@@ -1432,39 +1432,32 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 							ptpOperatorConfig.Spec.EventConfig.ApiVersion))
 					}
 
-					By("Checking cloud-event-proxy logs for v2 API config on all pods")
-					for _, pod := range ptpPods.Items {
-						// Verify cloud-event-proxy container exists
-						cloudProxyFound := false
-						for _, c := range pod.Spec.Containers {
-							if c.Name == pkg.EventProxyContainerName {
-								cloudProxyFound = true
-							}
+				By("Verifying v2 REST API health endpoint responds on all pods")
+				for podIndex := range ptpPods.Items {
+					pod := &ptpPods.Items[podIndex]
+					cloudProxyFound := false
+					for _, c := range pod.Spec.Containers {
+						if c.Name == pkg.EventProxyContainerName {
+							cloudProxyFound = true
 						}
-						Expect(cloudProxyFound).ToNot(BeFalse(),
-							fmt.Sprintf("No cloud-event-proxy container in pod %s", pod.Name))
-
-						logrus.Infof("Checking cloud-event-proxy logs on pod %s (node: %s)", pod.Name, pod.Spec.NodeName)
-
-						// Search for "starting v2 rest api server at port" in pod logs (literal text search)
-						matches, err := pods.GetPodLogsRegex(
-							pod.Namespace,
-							pod.Name,
-							pkg.EventProxyContainerName,
-							`starting v2 rest api server at port`,
-							true,
-							30*time.Second,
-						)
-						Expect(err).NotTo(HaveOccurred(),
-							fmt.Sprintf("Failed to get logs from pod %s", pod.Name))
-						Expect(matches).NotTo(BeEmpty(),
-							fmt.Sprintf("No 'starting v2 rest api server at port' found in cloud-event-proxy logs on pod %s", pod.Name))
-
-						logrus.Infof("Pod %s: found 'starting v2 rest api server at port' in logs", pod.Name)
 					}
-				})
+					Expect(cloudProxyFound).ToNot(BeFalse(),
+						fmt.Sprintf("No cloud-event-proxy container in pod %s", pod.Name))
 
-				// Verify cloud-event-proxy runs v2 when apiVersion is explicitly set to "2.0"
+					logrus.Infof("Checking v2 API health on pod %s (node: %s)", pod.Name, pod.Spec.NodeName)
+
+					Eventually(func() string {
+						buf, _, _ := pods.ExecCommand(client.Client, false, pod, pkg.EventProxyContainerName,
+							[]string{"curl", "-s", path.Join(event.ApiBaseV2, "health")})
+						return buf.String()
+					}, pkg.TimeoutIn3Minutes, 5*time.Second).Should(ContainSubstring("OK"),
+						fmt.Sprintf("v2 REST API health check failed on pod %s — API may not have defaulted to v2", pod.Name))
+
+					logrus.Infof("Pod %s: v2 REST API health endpoint returned OK", pod.Name)
+				}
+			})
+
+			// Verify cloud-event-proxy runs v2 when apiVersion is explicitly set to "2.0"
 				It("Should run event API v2 when apiVersion is explicitly set to 2.0 in PtpOperatorConfig", func() {
 					By("Setting apiVersion to 2.0 in PtpOperatorConfig")
 					err := ptphelper.EnablePTPEvent("2.0", "")
@@ -1493,38 +1486,31 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					Expect(err).NotTo(HaveOccurred())
 					Expect(len(ptpPods.Items)).To(BeNumerically(">", 0), "linuxptp-daemon is not deployed on cluster")
 
-					By("Checking cloud-event-proxy logs for v2 API config on all pods")
-					for _, pod := range ptpPods.Items {
-						// Verify cloud-event-proxy container exists
-						cloudProxyFound := false
-						for _, c := range pod.Spec.Containers {
-							if c.Name == pkg.EventProxyContainerName {
-								cloudProxyFound = true
-							}
+				By("Verifying v2 REST API health endpoint responds on all pods")
+				for podIndex := range ptpPods.Items {
+					pod := &ptpPods.Items[podIndex]
+					cloudProxyFound := false
+					for _, c := range pod.Spec.Containers {
+						if c.Name == pkg.EventProxyContainerName {
+							cloudProxyFound = true
 						}
-						Expect(cloudProxyFound).ToNot(BeFalse(),
-							fmt.Sprintf("No cloud-event-proxy container in pod %s", pod.Name))
-
-						logrus.Infof("Checking cloud-event-proxy logs on pod %s (node: %s)", pod.Name, pod.Spec.NodeName)
-
-						// Search for REST API config v2.0 in pod logs (literal text search)
-						matches, err := pods.GetPodLogsRegex(
-							pod.Namespace,
-							pod.Name,
-							pkg.EventProxyContainerName,
-							`starting v2 rest api server at port`,
-							true,
-							30*time.Second,
-						)
-						Expect(err).NotTo(HaveOccurred(),
-							fmt.Sprintf("Failed to get logs from pod %s", pod.Name))
-						Expect(matches).NotTo(BeEmpty(),
-							fmt.Sprintf("No 'starting v2 rest api server at port' found in cloud-event-proxy logs on pod %s", pod.Name))
-
-						logrus.Infof("Pod %s: found 'starting v2 rest api server at port' in logs", pod.Name)
 					}
-				})
-				// Verify invalid apiVersion values are rejected and pods are not restarted
+					Expect(cloudProxyFound).ToNot(BeFalse(),
+						fmt.Sprintf("No cloud-event-proxy container in pod %s", pod.Name))
+
+					logrus.Infof("Checking v2 API health on pod %s (node: %s)", pod.Name, pod.Spec.NodeName)
+
+					Eventually(func() string {
+						buf, _, _ := pods.ExecCommand(client.Client, false, pod, pkg.EventProxyContainerName,
+							[]string{"curl", "-s", path.Join(event.ApiBaseV2, "health")})
+						return buf.String()
+					}, pkg.TimeoutIn3Minutes, 5*time.Second).Should(ContainSubstring("OK"),
+						fmt.Sprintf("v2 REST API health check failed on pod %s — API may not be running as v2", pod.Name))
+
+					logrus.Infof("Pod %s: v2 REST API health endpoint returned OK", pod.Name)
+				}
+			})
+			// Verify invalid apiVersion values are rejected and pods are not restarted
 				It("Should reject invalid apiVersion and not restart pods", func() {
 					testCases := []struct {
 						name                   string
