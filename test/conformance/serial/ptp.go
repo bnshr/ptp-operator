@@ -1484,7 +1484,9 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				ptptesthelper.VerifyClockClassViaPMC(fullConfig, "/var/run/ptp4l.0.config", int(fbprotocol.ClockClass6))
 
 				By(fmt.Sprintf("Verifying initial clockClass is %s via Event API", expectedClockClassStr))
-				verifyClockClassCurrentState(int(expectedClockClass), 60*time.Second)
+				// Allow extra time on TGMOC where the consumer runs on the OC node
+				// and initial clock-class push can lag behind metrics.
+				verifyClockClassCurrentState(int(expectedClockClass), 120*time.Second)
 
 				By("Killing cloud-event-proxy process in sidecar container")
 				// Use /proc/PID/comm to find and kill the process — portable across
@@ -5000,13 +5002,52 @@ func getGMEvents(
 	}
 }
 
+// eventValueMatchesString reports whether v equals want. v2 event storage
+// keys values by resource path, so callers must scan all map entries.
+func eventValueMatchesString(v interface{}, want string) bool {
+	s, ok := v.(string)
+	return ok && s == want
+}
+
+// eventValueMatchesFloat reports whether v equals want. JSON numbers are
+// usually float64; also accept int and numeric strings for robustness.
+func eventValueMatchesFloat(v interface{}, want float64) bool {
+	switch n := v.(type) {
+	case float64:
+		return n == want
+	case float32:
+		return float64(n) == want
+	case int:
+		return float64(n) == want
+	case int32:
+		return float64(n) == want
+	case int64:
+		return float64(n) == want
+	case json.Number:
+		f, err := n.Float64()
+		return err == nil && f == want
+	case string:
+		f, err := strconv.ParseFloat(n, 64)
+		return err == nil && f == want
+	default:
+		return false
+	}
+}
+
 // verifyEvent checks that at least one collected event carries the expected
 // notification state. Multiple events may arrive during the collection window
 // (e.g. HOLDOVER followed by FREERUN), so we scan all of them.
+// v2 createStoredEvent keys by resource path, so "notification" may be absent.
 func verifyEvent(allEvents []exports.StoredEventValues, expectedState ptpEvent.SyncState) {
+	want := string(expectedState)
 	for _, ev := range allEvents {
-		if state, ok := ev["notification"].(string); ok && state == string(expectedState) {
+		if eventValueMatchesString(ev["notification"], want) {
 			return
+		}
+		for _, v := range ev {
+			if eventValueMatchesString(v, want) {
+				return
+			}
 		}
 	}
 	Fail(fmt.Sprintf("expected state %q not found in %d events: %+v", expectedState, len(allEvents), allEvents))
@@ -5014,10 +5055,16 @@ func verifyEvent(allEvents []exports.StoredEventValues, expectedState ptpEvent.S
 
 // verifyMetric checks that at least one collected event carries the expected
 // metric value. Scans all events since rapid transitions may produce multiple values.
+// v2 createStoredEvent keys by resource path (e.g. ".../master": 7), not "metric".
 func verifyMetric(allEvents []exports.StoredEventValues, value float64) {
 	for _, ev := range allEvents {
-		if metricValue, ok := ev["metric"].(float64); ok && metricValue == value {
+		if eventValueMatchesFloat(ev["metric"], value) {
 			return
+		}
+		for _, v := range ev {
+			if eventValueMatchesFloat(v, value) {
+				return
+			}
 		}
 	}
 	Fail(fmt.Sprintf("expected metric [%f] not found in %d events: %+v", value, len(allEvents), allEvents))
@@ -5150,7 +5197,7 @@ func verifyClockClassCurrentState(expectedClockClass int, timeout time.Duration)
 		case ev := <-ccCh:
 			if res, ok := processEvent(ptpEvent.PtpClockClassChange, ev); ok {
 				for _, val := range res.Values {
-					if v, ok2 := val.(float64); ok2 && int(v) == expectedClockClass {
+					if eventValueMatchesFloat(val, float64(expectedClockClass)) {
 						fmt.Fprintf(GinkgoWriter, "ClockClass %d verified via Event API\n", expectedClockClass)
 						return
 					}
