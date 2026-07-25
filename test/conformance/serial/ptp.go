@@ -1083,6 +1083,9 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 			})
 
 			It("DualNICBCHA phc2sys switches to secondary ptp4l when primary interface fails", func() {
+				if ptphelper.IsGnssSimConfigured() {
+					Skip("phc2sys is not started in netdevsim/Kind simulation (shared host CLOCK_REALTIME)")
+				}
 				if fullConfig.PtpModeDiscovered != testconfig.DualNICBoundaryClockHA {
 					Skip("Test only valid for Dual NIC Boundary Clocks with phc2sys HA configuration (DualNICBCHA)")
 				}
@@ -1447,11 +1450,15 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					Skip("Skipping: test applies to event API v2 only")
 				}
 
-				// Determine expected clock class based on PTP mode
-				// In 4.21+, OC correctly reports its local clock class (255/SlaveOnly)
-				// instead of the upstream GM's class (6).
+				// Determine expected clock class based on PTP mode.
+				// In 4.21+, OC CUT nodes report local clock class 255 (SlaveOnly),
+				// not the upstream GM's class (6). TGMOC / DualFollower CUTs are
+				// also OC followers, so they use 255; PMC gm.ClockClass stays 6.
 				expectedClockClass := fbprotocol.ClockClass6
-				if fullConfig.PtpModeDiscovered == testconfig.OrdinaryClock && ptphelper.IsPTPOperatorVersionAtLeast("4.21") {
+				cutIsOrdinaryFollower := fullConfig.PtpModeDiscovered == testconfig.OrdinaryClock ||
+					fullConfig.PtpModeDiscovered == testconfig.TelcoGMOC ||
+					fullConfig.PtpModeDiscovered == testconfig.DualFollowerClock
+				if cutIsOrdinaryFollower && ptphelper.IsPTPOperatorVersionAtLeast("4.21") {
 					expectedClockClass = fbprotocol.ClockClassSlaveOnly
 				}
 				expectedClockClassStr := strconv.Itoa(int(expectedClockClass))
@@ -2321,8 +2328,8 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 			})
 
 			It("Should restart phc2sys with no socket errors after SIGTERM", func() {
-				if fullConfig.PtpModeDiscovered == testconfig.TelcoGMBC {
-					Skip("In TGMBC, phc2sys on the BC depends on the full GNSS→GM→BC sync chain and may not reach status 1 in time")
+				if ptphelper.IsGnssSimConfigured() {
+					Skip("phc2sys is not started in netdevsim/Kind simulation (shared host CLOCK_REALTIME)")
 				}
 				verifyProcessRestartNoSocketErrors(fullConfig, "phc2sys")
 			})
@@ -2934,8 +2941,9 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 
 				gmPod := getGMPod()
 
-				By("checking sim GM required processes status (ts2phc, phc2sys, ptp4l)", func() {
-					processesArr := [...]string{"phc2sys", "ts2phc", "ptp4l"}
+				// phc2sys is omitted in Kind/netdevsim (shared host CLOCK_REALTIME).
+				By("checking sim GM required processes status (ts2phc, ptp4l)", func() {
+					processesArr := [...]string{"ts2phc", "ptp4l"}
 					for _, val := range processesArr {
 						logMatches, err := pods.GetPodLogsRegex(openshiftPtpNamespace, gmPod.Name, pkg.PtpContainerName, val, true, pkg.TimeoutIn1Minute)
 						Expect(err).To(BeNil(), fmt.Sprintf("Error encountered looking for %s", val))
@@ -2943,7 +2951,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					}
 				})
 
-				By("checking sim GM process metrics (skip gpsd/gpspipe)", func() {
+				By("checking sim GM process metrics (skip gpsd/gpspipe/phc2sys)", func() {
 					Eventually(func() string {
 						buf, _, _ := pods.ExecCommand(client.Client, true, gmPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
 						return buf.String()
@@ -2956,9 +2964,9 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 						if err != nil {
 							return false
 						}
-						return ret["phc2sys"] && ret["ptp4l"] && ret["ts2phc"]
+						return ret["ptp4l"] && ret["ts2phc"]
 					}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeTrue(),
-						"Expected phc2sys, ptp4l, ts2phc to all report process_status 1 for simulated GM")
+						"Expected ptp4l and ts2phc to report process_status 1 for simulated GM")
 				})
 			})
 
@@ -4226,12 +4234,13 @@ func processRunning(input string, state string) (map[string]bool, error) {
 }
 
 // processRunningSimGM is like processRunning but only checks processes that
-// exist in the simulated T-GM environment (no gpsd or gpspipe).
+// exist in the simulated T-GM environment (no gpsd, gpspipe, or phc2sys —
+// Kind/netdevsim shares one host CLOCK_REALTIME so phc2sys is not started).
 func processRunningSimGM(input string, state string) (map[string]bool, error) {
 	processStatusPattern := `openshift_ptp_process_status\{config="([^"]+)",node="([^"]+)",process="([^"]+)"\} (\d+)`
 	processStatusRe := regexp.MustCompile(processStatusPattern)
 
-	result := map[string]bool{"phc2sys": false, "ptp4l": false, "ts2phc": false}
+	result := map[string]bool{"ptp4l": false, "ts2phc": false}
 
 	scanner := bufio.NewScanner(strings.NewReader(input))
 	timeout := 10 * time.Second
@@ -4355,21 +4364,25 @@ func checkProcessStatus(fullConfig testconfig.TestConfig, state string) {
 	}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(ContainSubstring(metrics.OpenshiftPtpProcessStatus),
 		"Process status metrics are not detected")
 
-	Eventually(func() string {
-		buf, _, err := pods.ExecCommand(client.Client, true, fullConfig.DiscoveredClockUnderTestPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
-		if err != nil {
-			refreshPodOnNotFound(fullConfig.DiscoveredClockUnderTestPod, err)
-			return ""
-		}
-		return buf.String()
-	}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(ContainSubstring("phc2sys"),
-		"phc2ys process status not detected")
+	if !ptphelper.IsGnssSimConfigured() {
+		Eventually(func() string {
+			buf, _, err := pods.ExecCommand(client.Client, true, fullConfig.DiscoveredClockUnderTestPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
+			if err != nil {
+				refreshPodOnNotFound(fullConfig.DiscoveredClockUnderTestPod, err)
+				return ""
+			}
+			return buf.String()
+		}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(ContainSubstring("phc2sys"),
+			"phc2sys process status not detected")
+	}
 
 	time.Sleep(10 * time.Second)
 	buf, _, _ := pods.ExecCommand(client.Client, true, fullConfig.DiscoveredClockUnderTestPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
 	ret, err := processRunning(buf.String(), state)
 	Expect(err).To(BeNil())
-	Expect(ret["phc2sys"]).To(BeTrue(), fmt.Sprintf("Expected phc2sys to be  %s for GM", state))
+	if !ptphelper.IsGnssSimConfigured() {
+		Expect(ret["phc2sys"]).To(BeTrue(), fmt.Sprintf("Expected phc2sys to be  %s for GM", state))
+	}
 	Expect(ret["ptp4l"]).To(BeTrue(), fmt.Sprintf("Expected ptp4l to be  %s for GM", state))
 	Expect(ret["ts2phc"]).To(BeTrue(), fmt.Sprintf("Expected ts2phc to be  %s for GM", state))
 	Expect(ret["gpspipe"]).To(BeTrue(), fmt.Sprintf("Expected gpspipe to be %s for GM", state))

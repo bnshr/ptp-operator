@@ -192,7 +192,14 @@ $(KUSTOMIZE): $(LOCALBIN)
 		echo "$(LOCALBIN)/kustomize version is not expected $(KUSTOMIZE_VERSION). Removing it before installing."; \
 		rm -rf $(LOCALBIN)/kustomize; \
 	fi
-	test -s $(LOCALBIN)/kustomize || { curl -Ss $(if $(GITHUB_TOKEN),-H "Authorization: Bearer $(GITHUB_TOKEN)") $(KUSTOMIZE_INSTALL_SCRIPT) | GITHUB_TOKEN=$(GITHUB_TOKEN) bash -s -- $(subst v,,$(KUSTOMIZE_VERSION)) $(LOCALBIN); }
+	@if ! test -s $(LOCALBIN)/kustomize; then \
+		for i in 1 2 3; do \
+			curl -Ss --retry 3 --retry-delay 2 $(if $(GITHUB_TOKEN),-H "Authorization: Bearer $(GITHUB_TOKEN)") $(KUSTOMIZE_INSTALL_SCRIPT) | GITHUB_TOKEN=$(GITHUB_TOKEN) bash -s -- $(subst v,,$(KUSTOMIZE_VERSION)) $(LOCALBIN) && break; \
+			echo "kustomize install attempt $$i failed, retrying..."; \
+			sleep $$((i * 2)); \
+		done; \
+		test -s $(LOCALBIN)/kustomize || { echo "failed to install kustomize after retries"; exit 1; }; \
+	fi
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary. If wrong version is installed, it will be overwritten.
