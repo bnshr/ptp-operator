@@ -6,7 +6,6 @@ TEST_MODES="oc,bc,dualnicbc,dualnicbcha,dualfollower,tgm,tgmoc,tgmbc"
 RUN_PHASE="all"
 REGISTRY_IP=""
 TARBALL=""
-KEEP_TMP=true
 
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
@@ -15,25 +14,13 @@ while [[ "${1:-}" == --* ]]; do
         --images)  RUN_PHASE="images"; shift ;;
         --deploy)  RUN_PHASE="deploy"; REGISTRY_IP="$2"; shift 2 ;;
         --load)    RUN_PHASE="load"; TARBALL="$2"; shift 2 ;;
-        --clean-tmp) KEEP_TMP=false; shift ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
 
-# Per-run temp directory shared by all child scripts.
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export PTP_RUN_DIR="${REPO_ROOT}/.local-runs/$(date +%Y%m%d-%H%M%S)"
-mkdir -p "${PTP_RUN_DIR}"
-cleanup_run_dir() {
-  if [[ "${KEEP_TMP}" == false ]]; then
-    rm -rf "${PTP_RUN_DIR}"
-  else
-    echo "Temp directory retained: ${PTP_RUN_DIR}"
-  fi
-}
-trap cleanup_run_dir EXIT
-
-RUN_ON_VM_LOG="${PTP_RUN_DIR}/run-on-vm.log"
+# Save full run output under /tmp/ptp-operator (timestamped file; also shown on the terminal).
+mkdir -p /tmp/ptp-operator
+RUN_ON_VM_LOG="/tmp/ptp-operator/run-on-vm-$(date +%Y%m%d-%H%M%S).log"
 : >"${RUN_ON_VM_LOG}"
 exec > >(tee -a "${RUN_ON_VM_LOG}") 2>&1
 
@@ -91,7 +78,7 @@ run_quiet_with_log_dump_on_failure() {
   shift
 
   local log_file
-  log_file="$(mktemp "${PTP_RUN_DIR}/${log_tag// /_}.XXXXXX.log")"
+  log_file="$(mktemp "/tmp/ptp-operator/${log_tag// /_}.XXXXXX.log")"
 
   local rc
   if "$@" >"${log_file}" 2>&1 </dev/null; then
@@ -201,7 +188,7 @@ run_ptp_tools_parallel_make_step_rows() {
   done
   run_step_rows_begin "${rows[@]}"
 
-  local fifo="${PTP_RUN_DIR}/ptp-${fifo_tag}-done-$$.fifo"
+  local fifo="/tmp/ptp-operator/ptp-${fifo_tag}-done-$$.fifo"
   rm -f "${fifo}"
   mkfifo "${fifo}"
   exec 8<> "${fifo}"
@@ -272,6 +259,17 @@ run_quiet_with_log_dump_on_failure "install-tools" bash ./install-tools.sh
 export BASHRCSOURCED=1
 PS1="${PS1:-}" source ~/.bashrc
 
+step "Tidying and vendoring Go dependencies"
+run_step_rows_begin "go mod tidy" "go mod vendor"
+
+run_quiet_with_log_dump_on_failure "go-mod-tidy" go mod tidy
+run_step_row_done "go mod tidy"
+
+run_quiet_with_log_dump_on_failure "go-mod-vendor" go mod vendor
+run_step_row_done "go mod vendor"
+
+run_step_rows_end
+
 
 # Kill leftover gnss-sim from a previous run
 pkill -f gnss-sim || true
@@ -333,19 +331,18 @@ if [[ "$RUN_PHASE" == "load" ]]; then
 
     export IMG_PREFIX="$VM_IP/test"
 
-    mkdir -p "${PTP_RUN_DIR}/ptp-images-load"
-    tar xf "$TARBALL" -C "${PTP_RUN_DIR}/ptp-images-load"
-
-    read_ptp_tool_images
+    mkdir -p /tmp/ptp-images-load
+    tar xf "$TARBALL" -C /tmp/ptp-images-load
 
     step "Retagging images for local registry"
-    for t in "${_ptp_tool_images[@]}"; do
-        podman load -i "${PTP_RUN_DIR}/ptp-images-load/$t.tar"
+    TAGS=(lptpd cep ptpop krp openvswitch prometheus ptpmg debug gnss-sim)
+    for t in "${TAGS[@]}"; do
+        podman load -i "/tmp/ptp-images-load/$t.tar"
     done
 
-    OLD_PREFIX=$(podman images --format '{{.Repository}}:{{.Tag}}' | grep ":${_ptp_tool_images[0]}$" | head -1 | sed "s/:${_ptp_tool_images[0]}$//")
+    OLD_PREFIX=$(podman images --format '{{.Repository}}:{{.Tag}}' | grep ":${TAGS[0]}$" | head -1 | sed "s/:${TAGS[0]}$//")
     if [[ "$OLD_PREFIX" != "$IMG_PREFIX" ]]; then
-        for t in "${_ptp_tool_images[@]}"; do
+        for t in "${TAGS[@]}"; do
             podman tag "$OLD_PREFIX:$t" "$IMG_PREFIX:$t"
         done
     fi
@@ -358,7 +355,7 @@ if [[ "$RUN_PHASE" == "load" ]]; then
     step "Creating local registry"
     run_quiet_with_log_dump_on_failure "create-local-registry" ./create-local-registry.sh "$VM_IP"
 
-    for t in "${_ptp_tool_images[@]}"; do
+    for t in "${TAGS[@]}"; do
         podman push --quiet "$IMG_PREFIX:$t" "docker://$IMG_PREFIX:$t"
     done
 

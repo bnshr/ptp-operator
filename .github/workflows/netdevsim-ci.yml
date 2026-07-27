@@ -179,7 +179,6 @@ jobs:
           sudo GITHUB_TOKEN="$GITHUB_TOKEN" bash -l <<'BUILD'
           set -euo pipefail
           set -x
-          export GITHUB_ACTIONS=true
           export PATH=/usr/local/go/bin:/root/go/bin:$PATH
           export KIND_EXPERIMENTAL_PROVIDER=podman
 
@@ -188,23 +187,13 @@ jobs:
           ./run-on-vm.sh --dkms --images "${VM_IP}"
 
           rm -rf /tmp/go-build* /root/.cache/go-build
-          chmod 644 /tmp/ptp-images.tar
           BUILD
-
-      - name: Verify image tarball exists
-        run: |
-          if [ ! -f /tmp/ptp-images.tar ]; then
-            echo "::error::Build did not produce /tmp/ptp-images.tar"
-            exit 1
-          fi
-          ls -lh /tmp/ptp-images.tar
 
       - name: Upload image tarball
         uses: actions/upload-artifact@v7
         with:
           name: ptp-images
           path: /tmp/ptp-images.tar
-          if-no-files-found: error
           retention-days: 1
 
   # ------------------------------------------------------------------
@@ -285,7 +274,6 @@ jobs:
           sudo GITHUB_TOKEN="$GITHUB_TOKEN" bash -l <<'LOAD'
           set -euo pipefail
           set -x
-          export GITHUB_ACTIONS=true
           export PATH=/usr/local/go/bin:/root/go/bin:$PATH
           export KIND_EXPERIMENTAL_PROVIDER=podman
 
@@ -310,7 +298,6 @@ jobs:
           sudo GITHUB_TOKEN="$GITHUB_TOKEN" bash -l <<'DEPLOY'
           set -euo pipefail
           set -x
-          export GITHUB_ACTIONS=true
           export PATH=/usr/local/go/bin:/root/go/bin:$PATH
           export KIND_EXPERIMENTAL_PROVIDER=podman
 

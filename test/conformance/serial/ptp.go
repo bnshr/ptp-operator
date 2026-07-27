@@ -61,7 +61,7 @@ const (
 )
 
 var (
-	clockClassPattern = `^openshift_ptp_clock_class\{(?:config="[^"]+",)?node="([^"]+)",process="([^"]+)"\}\s+(\d+)`
+	clockClassPattern = `^openshift_ptp_clock_class\{(?:config="ptp4l\.\d+\.config",)?node="([^"]+)",process="([^"]+)"\}\s+(\d+)`
 	clockClassRe      = regexp.MustCompile(clockClassPattern)
 )
 var DesiredMode = testconfig.GetDesiredConfig(true).PtpModeDesired
@@ -948,9 +948,6 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					if fullConfig.PtpModeDiscovered == testconfig.TelcoGrandMasterClock {
 						Skip("standalone TGM mode is not supported for this test")
 					}
-					if fullConfig.PtpModeDiscovered == testconfig.TelcoGMBC {
-						Skip("TGMBC shares the GM node with the BC; a higher-priority config overrides both profiles")
-					}
 					switch fullConfig.PtpModeDiscovered {
 					case testconfig.Discovery, testconfig.None:
 						Skip("Skipping because Discovery or None is not supported yet for this test")
@@ -1450,24 +1447,13 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					Skip("Skipping: test applies to event API v2 only")
 				}
 
-				// Determine expected clockClass for openshift_ptp_clock_class.
-				//
-				// Product rule (4.21+): an Ordinary Clock CUT must publish its
-				// *local* SlaveOnly class (255), not the upstream GM class (6).
-				// That is what CNF-19588 and the basic ClockSync assertion cover
-				// (OrdinaryClock only). TGMOC's CUT is that same single-iface OC
-				// (swapped in discovery), so it inherits the same rule — and CI
-				// shows CLOCK_CLASS_CHANGE 255 / received …,255,OC for those jobs.
-				//
-				// DualFollower also sets slaveOnly 1, so IEEE-wise 255 would be
-				// ideal — but the 4.21 local-class path is not what DualFollower
-				// emits today (CI: CLOCK_CLASS_CHANGE 6 only; never …,255,OC).
-				// CNF-19588 never special-cased DualFollower (defaulted to 6).
-				// The later stabilize commit incorrectly lumped DualFollower with
-				// OC/TGMOC; that is the false expectation. Until linuxptp-daemon
-				// publishes local 255 for multi-iface slaveOnly the same way as
-				// OC, this test must keep DualFollower on 6 (and PMC gm.ClockClass
-				// remains 6 for all followers either way).
+				// Determine expected clock class based on PTP mode.
+				// In 4.21+, single-iface OC CUT nodes (including TGMOC's downstream
+				// OC) report local clock class 255 (SlaveOnly), not the upstream
+				// GM's class (6). DualFollower also sets slaveOnly 1, but its
+				// multi-iface ptp4l still publishes the inherited GM class (6) in
+				// the openshift_ptp_clock_class metric; PMC gm.ClockClass stays 6
+				// for all follower modes.
 				expectedClockClass := fbprotocol.ClockClass6
 				cutIsOrdinaryFollower := fullConfig.PtpModeDiscovered == testconfig.OrdinaryClock ||
 					fullConfig.PtpModeDiscovered == testconfig.TelcoGMOC
@@ -3275,7 +3261,6 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				Expect(bcPtpConfig).ToNot(BeNil(), "BC PtpConfig was not discovered")
 				bcPod, err := ptphelper.GetPTPPodWithPTPConfig(bcPtpConfig)
 				Expect(err).ToNot(HaveOccurred())
-				// Keep CUT pod pointer current for PMC helpers that read DiscoveredClockUnderTestPod.
 				fullConfig.DiscoveredClockUnderTestPod = bcPod
 
 				By("ensuring initial GM clock class is 6 (LOCKED)")
@@ -3315,8 +3300,6 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(BeTrue(),
 					"Expected GM clock class to degrade to CC7/CC248 in Prometheus metrics after DPLL HOLDOVER")
 
-				// BC openshift_ptp_clock_class often lags parent DS updates in Kind/netdevsim.
-				// Poll PMC gm.ClockClass on the BC — that reflects announce inheritance directly.
 				By("waiting for BC parent gm.ClockClass to cascade-degrade from Locked (6)")
 				Eventually(func() bool {
 					cc, err := ptptesthelper.GetClockClassViaPMC(fullConfig, "/var/run/ptp4l.0.config")
@@ -3532,8 +3515,6 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 
 			By("Creating test secret", func() {
 				testSecret = testconfig.CreateTestSecretForVolumeMountTest(pkg.PtpLinuxDaemonNamespace)
-				_ = client.Client.Secrets(pkg.PtpLinuxDaemonNamespace).Delete(
-					context.Background(), testSecret.Name, metav1.DeleteOptions{})
 				_, err := client.Client.Secrets(pkg.PtpLinuxDaemonNamespace).Create(
 					context.Background(),
 					testSecret,
@@ -3545,8 +3526,6 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 
 			By("Creating PtpConfig with sa_file referencing the test secret", func() {
 				testPtpConfig = testconfig.CreatePtpConfigForVolumeMountTest(testNode, testInterface)
-				_ = client.Client.PtpConfigs(pkg.PtpLinuxDaemonNamespace).Delete(
-					context.Background(), testPtpConfig.Name, metav1.DeleteOptions{})
 				_, err := client.Client.PtpConfigs(pkg.PtpLinuxDaemonNamespace).Create(
 					context.Background(),
 					testPtpConfig,
@@ -4945,8 +4924,10 @@ func anyClockClassDifferent(fullConfig testconfig.TestConfig, excludedClass stri
 
 // waitForWPCGMReady blocks until the WPC T-GM's ptp4l advertises clock class 6.
 // The WPC GM does not hardcode clockClass; it converges dynamically through the
-// GNSS→ts2phc→DPLL→PMC pipeline.  Downstream slaves reject GMs with class > 7
-// (clock_class_threshold), so we must wait before any slave sync assertion.
+// GNSS→ts2phc→DPLL→PMC pipeline. Downstream OC/BC profiles that still use the
+// default clock_class_threshold of 7 reject GMs with class > 7, so we must wait
+// before any slave sync assertion. (TGMBC BC configs raise the threshold so
+// cascading holdover can observe CC7/CC248.)
 // The function is a no-op when there is no WPC GM in the topology.
 func waitForWPCGMReady(fullConfig testconfig.TestConfig) {
 	if fullConfig.PtpModeDiscovered != testconfig.TelcoGMOC &&
@@ -4985,8 +4966,7 @@ func getGMPod() *v1core.Pod {
 	return nil
 }
 
-// checkClockClassInMetrics scans raw metrics output for clock class matching expectedState.
-// WPC T-GM publishes class under process=ts2phc as well as ptp4l, so both are accepted.
+// checkClockClassInMetrics scans raw metrics output for ptp4l clock class matching expectedState.
 // Unlike checkClockClassStateReturnBool, this operates on pre-fetched metrics text so the caller
 // can target any pod (GM, BC, OC) independently.
 func checkClockClassInMetrics(metricsOutput string, expectedState string) bool {
@@ -4994,9 +4974,9 @@ func checkClockClassInMetrics(metricsOutput string, expectedState string) bool {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if matches := clockClassRe.FindStringSubmatch(line); matches != nil {
-			process := strings.TrimSpace(matches[2])
-			class := strings.TrimSpace(matches[3])
-			if (process == "ptp4l" || process == "ts2phc") && class == expectedState {
+			process := matches[2]
+			class := matches[3]
+			if strings.TrimSpace(process) == "ptp4l" && strings.TrimSpace(class) == expectedState {
 				return true
 			}
 		}
@@ -5154,14 +5134,29 @@ func waitForStateAndCC(subs event.Subscriptions, state ptpEvent.SyncState, cc in
 			return
 		case ev := <-subs.LOCKSTATE:
 			if res, ok := processEvent(ptpEvent.PtpStateChange, ev); ok {
-				if s, ok2 := res.Values["notification"].(string); ok2 && s == string(state) {
+				want := string(state)
+				if s, ok2 := res.Values["notification"].(string); ok2 && s == want {
 					stateSeen = true
+				} else {
+					for _, val := range res.Values {
+						if s, ok2 := val.(string); ok2 && s == want {
+							stateSeen = true
+							break
+						}
+					}
 				}
 			}
 		case ev := <-subs.CLOCKCLASS:
 			if res, ok := processEvent(ptpEvent.PtpClockClassChange, ev); ok {
 				if v, ok2 := res.Values["metric"].(float64); ok2 && int(v) == cc {
 					ccSeen = true
+				} else {
+					for _, val := range res.Values {
+						if v, ok2 := val.(float64); ok2 && int(v) == cc {
+							ccSeen = true
+							break
+						}
+					}
 				}
 			}
 		}

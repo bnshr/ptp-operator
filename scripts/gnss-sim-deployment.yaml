@@ -26,12 +26,10 @@ spec:
             - /bin/sh
             - -c
             - |
-              DPLL_SYSFS="${GNSS_SIM_DPLL_SYSFS:-}"
-              if [ -z "$DPLL_SYSFS" ]; then
-                for f in /sys/bus/pci/devices/*/dpll/lock_status; do
-                  [ -f "$f" ] && DPLL_SYSFS="$f" && break
-                done
-              fi
+              DPLL_SYSFS=""
+              for f in /sys/bus/pci/devices/*/dpll/lock_status; do
+                [ -f "$f" ] && DPLL_SYSFS="$f" && break
+              done
               DPLL_ARGS=""
               [ -n "$DPLL_SYSFS" ] && DPLL_ARGS="--dpll-sysfs $DPLL_SYSFS"
               GNSS_DEV=""
@@ -52,9 +50,6 @@ spec:
                   --holdover-timeout "$HOLDOVER_TIMEOUT" \
                   $DPLL_ARGS
               fi
-          env:
-            - name: GNSS_SIM_DPLL_SYSFS
-              value: "DPLL_SYSFS_PATH"
           securityContext:
             privileged: true
           volumeMounts:
@@ -63,8 +58,6 @@ spec:
             - name: host-sys
               mountPath: /sys
               mountPropagation: Bidirectional
-            - name: pci-devices
-              mountPath: /sys/bus/pci/devices
             - name: ptp-run
               mountPath: /var/run/ptp
           readinessProbe:
@@ -86,9 +79,6 @@ spec:
         - name: host-sys
           hostPath:
             path: /sys
-        - name: pci-devices
-          hostPath:
-            path: /sys/bus/pci/devices
         - name: ptp-run
           hostPath:
             path: /var/run/ptp

@@ -699,7 +699,8 @@ func initAndSolveProblems() {
 		{{int(solver.StepNil), 0, 0}},         // step1
 		{{int(solver.StepSameLan2), 2, 0, 1}}, // step2
 		{{int(solver.StepSameLan2), 2, 1, 2}, // step3
-			{int(solver.StepSameNic), 2, 0, 2}}, // step3: both followers share the same NIC/PHC
+			{int(solver.StepSameNic), 2, 0, 2}}, // step3
+
 	}
 
 	data.problems[AlgoBCString] = &[][][]int{
@@ -732,6 +733,7 @@ func initAndSolveProblems() {
 	}
 
 	// T-BC with local GM: WPC NIC required, receiver, two transmitters on same NIC, local GM
+	// CUT is the T-BC; keep the local GM off that node.
 	data.problems[AlgoTelcoBCString] = &[][][]int{
 		{{int(solver.StepIsWPCNic), 1, 0}},   // step1: T-BC receiver must be on WPC NIC
 		{{int(solver.StepSameNic), 2, 0, 1}}, // step2: transmitter 1 on same NIC as receiver
@@ -751,6 +753,7 @@ func initAndSolveProblems() {
 	}
 
 	// T-BC with slaves and local GM: WPC NIC required, slave, receiver, two transmitters on same NIC, local GM
+	// CUT is the T-BC. Downstream OC may share the GM node.
 	data.problems[AlgoTelcoBCWithSlavesString] = &[][][]int{
 		{{int(solver.StepNil), 0, 0}},         // step1: slave interface (can be anything)
 		{{int(solver.StepSameLan2), 2, 0, 2}}, // step2: Slave on the same lan as transmitters
@@ -775,6 +778,7 @@ func initAndSolveProblems() {
 	}
 
 	// TGM + OC: WPC GM on slot 0, downstream OC slave on slot 1
+	// CUT is the OC; keep T-GM off that node so priority-override tests cannot wipe the GM.
 	data.problems[AlgoTGMOCString] = &[][][]int{
 		{{int(solver.StepIsWPCNic), 1, 0}}, // step1: GM must be WPC
 		{{int(solver.StepSameLan2), 2, 0, 1}, // step2: OC slave on same LAN as GM
@@ -782,6 +786,7 @@ func initAndSolveProblems() {
 	}
 
 	// TGM + BC: WPC GM on slot 0, BC slave on slot 1, BC master on slot 2
+	// CUT is the BC; keep T-GM off that node so priority-override tests cannot wipe the GM.
 	data.problems[AlgoTGMBCString] = &[][][]int{
 		{{int(solver.StepIsWPCNic), 1, 0}}, // step1: GM must be WPC
 		{{int(solver.StepSameLan2), 2, 0, 1}, // step2: BC slave on same LAN as GM
@@ -790,6 +795,7 @@ func initAndSolveProblems() {
 	}
 
 	// TGM + BC + downstream OC: WPC GM slot 0, BC slave slot 1, BC master slot 2, downstream OC slot 3
+	// CUT is the BC. Downstream OC may share the GM node (not affected by priority tests).
 	data.problems[AlgoTGMBCWithSlavesString] = &[][][]int{
 		{{int(solver.StepIsWPCNic), 1, 0}}, // step1: GM must be WPC
 		{{int(solver.StepSameLan2), 2, 0, 1}, // step2: BC slave on same LAN as GM
@@ -797,8 +803,7 @@ func initAndSolveProblems() {
 		{{int(solver.StepSameNic), 2, 1, 2}}, // step3: BC slave + master on same NIC
 		{{int(solver.StepSameLan2), 2, 2, 3}, // step4: downstream OC on BC master LAN
 			{int(solver.StepSameNic), 2, 0, 3, solver.Negative},   // GM and downstream OC on different NICs
-			{int(solver.StepSameLan2), 2, 0, 3, solver.Negative},  // GM and downstream OC on different LANs
-			{int(solver.StepSameNode), 2, 0, 3, solver.Negative}}, // and not on the GM node (avoids co-located slave profile)
+			{int(solver.StepSameLan2), 2, 0, 3, solver.Negative}}, // GM and downstream OC on different LANs
 	}
 
 	data.problems[AlgoDualNicBCWithSlavesString] = &[][][]int{
@@ -1333,15 +1338,13 @@ func CreatePtpConfigBC(policyName, nodeName, ifMasterName, ifSlaveName string, p
 	}
 
 	bcConfig := GetPtp4lConfigWithAuth(BasePtp4lConfig) + "\nboundary_clock_jbod 1\ngmCapable 0"
-	// TGMBC cascading-holdover tests require the BC to tolerate the upstream
-	// T-GM's CC7 (holdover) while still cascading when the GM reaches CC248
-	// (freerun). Threshold 135 keeps the BC SLAVE during holdover (7 ≤ 135)
-	// but triggers LISTENING when freerun starts (248 > 135), which makes the
-	// BC's own clock class degrade — exactly what the cascade tests verify.
-	// (The default threshold of 7 also works but logs spurious "Master clock
-	// quality received is greater than configured" warnings during holdover.)
+	// TGMBC cascading-holdover tests require the BC to remain locked while the
+	// upstream T-GM announces CC7 (holdover) and CC248 (freerun). The default
+	// threshold of 7 rejects those classes ("Master clock quality received is
+	// greater than configured, ignoring master!"), so the BC never inherits the
+	// degraded clock class. linuxptp rejects values > 248 for this option.
 	if GlobalConfig.PtpModeDesired == TelcoGMBC {
-		bcConfig = strings.Replace(bcConfig, "clock_class_threshold 7", "clock_class_threshold 135", 1)
+		bcConfig = strings.Replace(bcConfig, "clock_class_threshold 7", "clock_class_threshold 248", 1)
 	}
 	bcConfig = AddAuthSettings(AddInterface(bcConfig, ifSlaveName, 0))
 	bcConfig = AddAuthSettings(AddInterface(bcConfig, ifMasterName, 1))
@@ -2259,6 +2262,7 @@ func createTelcoBCConfig(configName string, receiverConfig, transmitterConfig st
 
 func createConfigWithTs2PhcAndPlugins(profileName string, ifaceName, ptp4lOpts *string, ptp4lConfig string, ts2phcConfig string, phc2sysOpts *string, nodeLabel string, priority *int64, ptpSchedulingPolicy string, ptpSchedulingPriority *int64, ts2phcOpts *string, plugins map[string]*apiextensions.JSON) error {
 	thresholds := ptpv1.PtpClockThreshold{}
+	phc2sysOpts = omitPhc2sysInSimulation(phc2sysOpts)
 
 	testParameters, err := ptptestconfig.GetPtpTestConfig()
 	if err != nil {
@@ -2267,7 +2271,6 @@ func createConfigWithTs2PhcAndPlugins(profileName string, ifaceName, ptp4lOpts *
 	thresholds.MaxOffsetThreshold = int64(testParameters.GlobalConfig.MaxOffset)
 	thresholds.MinOffsetThreshold = int64(testParameters.GlobalConfig.MinOffset)
 	ptpSettings := map[string]string{"logReduce": "false"}
-	phc2sysOpts = omitPhc2sysInSimulation(phc2sysOpts)
 	ptpProfile := ptpv1.PtpProfile{Name: &profileName, Interface: ifaceName, Phc2sysOpts: phc2sysOpts, Ptp4lOpts: ptp4lOpts, PtpSchedulingPolicy: &ptpSchedulingPolicy, PtpSchedulingPriority: ptpSchedulingPriority,
 		PtpClockThreshold: &thresholds, Ts2PhcOpts: ts2phcOpts, Plugins: plugins, PtpSettings: ptpSettings}
 	if ptp4lConfig != "" {
