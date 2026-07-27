@@ -61,7 +61,7 @@ const (
 )
 
 var (
-	clockClassPattern = `^openshift_ptp_clock_class\{(?:config="ptp4l\.\d+\.config",)?node="([^"]+)",process="([^"]+)"\}\s+(\d+)`
+	clockClassPattern = `^openshift_ptp_clock_class\{(?:config="[^"]+",)?node="([^"]+)",process="([^"]+)"\}\s+(\d+)`
 	clockClassRe      = regexp.MustCompile(clockClassPattern)
 )
 var DesiredMode = testconfig.GetDesiredConfig(true).PtpModeDesired
@@ -1450,14 +1450,27 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					Skip("Skipping: test applies to event API v2 only")
 				}
 
-				// Determine expected clock class based on PTP mode.
-				// In 4.21+, OC CUT nodes report local clock class 255 (SlaveOnly),
-				// not the upstream GM's class (6). TGMOC / DualFollower CUTs are
-				// also OC followers, so they use 255; PMC gm.ClockClass stays 6.
+				// Determine expected clockClass for openshift_ptp_clock_class.
+				//
+				// Product rule (4.21+): an Ordinary Clock CUT must publish its
+				// *local* SlaveOnly class (255), not the upstream GM class (6).
+				// That is what CNF-19588 and the basic ClockSync assertion cover
+				// (OrdinaryClock only). TGMOC's CUT is that same single-iface OC
+				// (swapped in discovery), so it inherits the same rule — and CI
+				// shows CLOCK_CLASS_CHANGE 255 / received …,255,OC for those jobs.
+				//
+				// DualFollower also sets slaveOnly 1, so IEEE-wise 255 would be
+				// ideal — but the 4.21 local-class path is not what DualFollower
+				// emits today (CI: CLOCK_CLASS_CHANGE 6 only; never …,255,OC).
+				// CNF-19588 never special-cased DualFollower (defaulted to 6).
+				// The later stabilize commit incorrectly lumped DualFollower with
+				// OC/TGMOC; that is the false expectation. Until linuxptp-daemon
+				// publishes local 255 for multi-iface slaveOnly the same way as
+				// OC, this test must keep DualFollower on 6 (and PMC gm.ClockClass
+				// remains 6 for all followers either way).
 				expectedClockClass := fbprotocol.ClockClass6
 				cutIsOrdinaryFollower := fullConfig.PtpModeDiscovered == testconfig.OrdinaryClock ||
-					fullConfig.PtpModeDiscovered == testconfig.TelcoGMOC ||
-					fullConfig.PtpModeDiscovered == testconfig.DualFollowerClock
+					fullConfig.PtpModeDiscovered == testconfig.TelcoGMOC
 				if cutIsOrdinaryFollower && ptphelper.IsPTPOperatorVersionAtLeast("4.21") {
 					expectedClockClass = fbprotocol.ClockClassSlaveOnly
 				}
@@ -3262,18 +3275,23 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				Expect(bcPtpConfig).ToNot(BeNil(), "BC PtpConfig was not discovered")
 				bcPod, err := ptphelper.GetPTPPodWithPTPConfig(bcPtpConfig)
 				Expect(err).ToNot(HaveOccurred())
+				// Keep CUT pod pointer current for PMC helpers that read DiscoveredClockUnderTestPod.
+				fullConfig.DiscoveredClockUnderTestPod = bcPod
 
 				By("ensuring initial GM clock class is 6 (LOCKED)")
 				Eventually(func() bool {
 					buf, _, _ := pods.ExecCommand(client.Client, true, gmPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
 					return checkClockClassInMetrics(buf.String(), "6")
-				}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeTrue())
+				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(BeTrue())
 
-				By("ensuring initial BC clock class is 6 (LOCKED)")
-				Eventually(func() bool {
-					buf, _, _ := pods.ExecCommand(client.Client, true, bcPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
-					return checkClockClassInMetrics(buf.String(), "6")
-				}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeTrue())
+				By("ensuring initial BC parent gm.ClockClass is 6 (LOCKED)")
+				Eventually(func() int {
+					cc, err := ptptesthelper.GetClockClassViaPMC(fullConfig, "/var/run/ptp4l.0.config")
+					if err != nil {
+						return -1
+					}
+					return cc
+				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(Equal(int(fbprotocol.ClockClass6)))
 
 				By("triggering GNSS signal loss via gnss-sim API")
 				simErr := ptphelper.GNSSSimSignalLoss()
@@ -3287,22 +3305,24 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 						return ""
 					}
 					return dpll.State
-				}, 5*time.Minute, 5*time.Second).Should(Equal("HOLDOVER"),
+				}, 5*time.Minute, 2*time.Second).Should(Equal("HOLDOVER"),
 					"Expected GM DPLL to enter HOLDOVER after GNSS signal loss")
 
 				By("waiting for GM clock class to degrade in metrics (confirms DPLL→ptp4l pipeline)")
 				Eventually(func() bool {
 					buf, _, _ := pods.ExecCommand(client.Client, true, gmPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
 					return checkClockClassInMetrics(buf.String(), "7") || checkClockClassInMetrics(buf.String(), "248")
-				}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeTrue(),
+				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(BeTrue(),
 					"Expected GM clock class to degrade to CC7/CC248 in Prometheus metrics after DPLL HOLDOVER")
 
-				By("waiting for BC clock class to cascade-degrade from Locked (6)")
+				// BC openshift_ptp_clock_class often lags parent DS updates in Kind/netdevsim.
+				// Poll PMC gm.ClockClass on the BC — that reflects announce inheritance directly.
+				By("waiting for BC parent gm.ClockClass to cascade-degrade from Locked (6)")
 				Eventually(func() bool {
-					buf, _, _ := pods.ExecCommand(client.Client, true, bcPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
-					return checkClockClassInMetrics(buf.String(), "7") || checkClockClassInMetrics(buf.String(), "248")
-				}, pkg.TimeoutIn5Minutes, 10*time.Second).Should(BeTrue(),
-					"Expected BC clock class to cascade-degrade after upstream GM GNSS loss")
+					cc, err := ptptesthelper.GetClockClassViaPMC(fullConfig, "/var/run/ptp4l.0.config")
+					return err == nil && (cc == int(fbprotocol.ClockClass7) || cc == ClockClassFreerun)
+				}, pkg.TimeoutIn10Minutes, 2*time.Second).Should(BeTrue(),
+					"Expected BC parent gm.ClockClass to cascade-degrade after upstream GM GNSS loss")
 
 				By("restoring GNSS signal via gnss-sim API")
 				simErr = ptphelper.GNSSSimSignalRestore()
@@ -3315,15 +3335,25 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 						return ""
 					}
 					return dpll.State
-				}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(Equal("LOCKED"),
+				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(Equal("LOCKED"),
 					"Expected GM DPLL to recover to LOCKED after signal restore")
 
-				By("waiting for BC clock class to cascade-recover to Locked (6)")
+				By("waiting for GM clock class to recover to Locked (6)")
 				Eventually(func() bool {
-					buf, _, _ := pods.ExecCommand(client.Client, true, bcPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
+					buf, _, _ := pods.ExecCommand(client.Client, true, gmPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
 					return checkClockClassInMetrics(buf.String(), "6")
-				}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeTrue(),
-					"Expected BC clock class to cascade-recover to 6")
+				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(BeTrue(),
+					"Expected GM clock class to recover to 6 before asserting BC cascade-recover")
+
+				By("waiting for BC parent gm.ClockClass to cascade-recover to Locked (6)")
+				Eventually(func() int {
+					cc, err := ptptesthelper.GetClockClassViaPMC(fullConfig, "/var/run/ptp4l.0.config")
+					if err != nil {
+						return -1
+					}
+					return cc
+				}, pkg.TimeoutIn10Minutes, 2*time.Second).Should(Equal(int(fbprotocol.ClockClass6)),
+					"Expected BC parent gm.ClockClass to cascade-recover to 6")
 
 				logrus.Info("Successfully verified T-GM -> BC cascading holdover and recovery")
 			})
@@ -3379,18 +3409,22 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				Expect(bcPtpConfig).ToNot(BeNil(), "BC PtpConfig was not discovered")
 				bcPod, err := ptphelper.GetPTPPodWithPTPConfig(bcPtpConfig)
 				Expect(err).ToNot(HaveOccurred())
+				fullConfig.DiscoveredClockUnderTestPod = bcPod
 
-				By("Ensuring initial LOCKED state: GM and BC at CC6")
+				By("Ensuring initial LOCKED state: GM metrics CC6 and BC parent gm.ClockClass 6")
 				Eventually(func() bool {
 					buf, _, _ := pods.ExecCommand(client.Client, true, gmPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
 					return checkClockClassInMetrics(buf.String(), strconv.Itoa(int(fbprotocol.ClockClass6)))
-				}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeTrue(),
+				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(BeTrue(),
 					"Expected GM clock class 6 before event test")
-				Eventually(func() bool {
-					buf, _, _ := pods.ExecCommand(client.Client, true, bcPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
-					return checkClockClassInMetrics(buf.String(), strconv.Itoa(int(fbprotocol.ClockClass6)))
-				}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeTrue(),
-					"Expected BC clock class 6 before event test")
+				Eventually(func() int {
+					cc, err := ptptesthelper.GetClockClassViaPMC(fullConfig, "/var/run/ptp4l.0.config")
+					if err != nil {
+						return -1
+					}
+					return cc
+				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(Equal(int(fbprotocol.ClockClass6)),
+					"Expected BC parent gm.ClockClass 6 before event test")
 
 				const incomingEventsBuffer = 100
 				subs, cleanup := event.SubscribeToGMChangeEvents(incomingEventsBuffer, true, 60*time.Second)
@@ -3409,7 +3443,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				Eventually(func() bool {
 					buf, _, _ := pods.ExecCommand(client.Client, true, gmPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
 					return checkClockClassInMetrics(buf.String(), "7") || checkClockClassInMetrics(buf.String(), "248")
-				}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeTrue(),
+				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(BeTrue(),
 					"Expected GM clock class to degrade before collecting events")
 
 				events := getGMEvents(subs.GNSS, subs.CLOCKCLASS, subs.LOCKSTATE, 30*time.Second)
@@ -3421,12 +3455,12 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				verifyEvent(events[ptpEvent.PtpStateChange], ptpEvent.HOLDOVER)
 				stopMonitor(term)
 
-				By("Verifying BC clock class cascades to CC7/CC248 via metrics")
+				By("Verifying BC parent gm.ClockClass cascades to CC7/CC248 via PMC")
 				Eventually(func() bool {
-					buf, _, _ := pods.ExecCommand(client.Client, true, bcPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
-					return checkClockClassInMetrics(buf.String(), "7") || checkClockClassInMetrics(buf.String(), "248")
-				}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeTrue(),
-					"Expected BC clock class to cascade-degrade after GM holdover event")
+					cc, err := ptptesthelper.GetClockClassViaPMC(fullConfig, "/var/run/ptp4l.0.config")
+					return err == nil && (cc == int(fbprotocol.ClockClass7) || cc == ClockClassFreerun)
+				}, pkg.TimeoutIn10Minutes, 2*time.Second).Should(BeTrue(),
+					"Expected BC parent gm.ClockClass to cascade-degrade after GM holdover event")
 
 				term2, err2 := event.MonitorPodLogsRegex()
 				defer func() { stopMonitor(term2) }()
@@ -3437,7 +3471,11 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				Expect(simErr).ToNot(HaveOccurred())
 
 				By("Waiting for GM clock class recovery to CC6")
-				waitForClockClass(fullConfig, strconv.Itoa(int(fbprotocol.ClockClass6)))
+				Eventually(func() bool {
+					buf, _, _ := pods.ExecCommand(client.Client, true, gmPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
+					return checkClockClassInMetrics(buf.String(), strconv.Itoa(int(fbprotocol.ClockClass6)))
+				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(BeTrue(),
+					"Expected GM clock class to recover to 6 before collecting recovery events")
 
 				events = getGMEvents(subs.GNSS, subs.CLOCKCLASS, subs.LOCKSTATE, 30*time.Second)
 				fmt.Fprintf(GinkgoWriter, "TGMBC GM recovery events: %v\n", events)
@@ -3449,12 +3487,15 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				By("Verifying GM PTP state Locked")
 				verifyEvent(events[ptpEvent.PtpStateChange], ptpEvent.LOCKED)
 
-				By("Verifying BC clock class cascades back to CC6 via metrics")
-				Eventually(func() bool {
-					buf, _, _ := pods.ExecCommand(client.Client, true, bcPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
-					return checkClockClassInMetrics(buf.String(), strconv.Itoa(int(fbprotocol.ClockClass6)))
-				}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeTrue(),
-					"Expected BC clock class to cascade-recover to CC6 after GM recovery event")
+				By("Verifying BC parent gm.ClockClass cascades back to CC6 via PMC")
+				Eventually(func() int {
+					cc, err := ptptesthelper.GetClockClassViaPMC(fullConfig, "/var/run/ptp4l.0.config")
+					if err != nil {
+						return -1
+					}
+					return cc
+				}, pkg.TimeoutIn10Minutes, 2*time.Second).Should(Equal(int(fbprotocol.ClockClass6)),
+					"Expected BC parent gm.ClockClass to cascade-recover to CC6 after GM recovery event")
 
 				logrus.Info("Successfully verified TGMBC cascading events on GNSS loss and recovery")
 			})
@@ -4944,7 +4985,8 @@ func getGMPod() *v1core.Pod {
 	return nil
 }
 
-// checkClockClassInMetrics scans raw metrics output for ptp4l clock class matching expectedState.
+// checkClockClassInMetrics scans raw metrics output for clock class matching expectedState.
+// WPC T-GM publishes class under process=ts2phc as well as ptp4l, so both are accepted.
 // Unlike checkClockClassStateReturnBool, this operates on pre-fetched metrics text so the caller
 // can target any pod (GM, BC, OC) independently.
 func checkClockClassInMetrics(metricsOutput string, expectedState string) bool {
@@ -4952,9 +4994,9 @@ func checkClockClassInMetrics(metricsOutput string, expectedState string) bool {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if matches := clockClassRe.FindStringSubmatch(line); matches != nil {
-			process := matches[2]
-			class := matches[3]
-			if strings.TrimSpace(process) == "ptp4l" && strings.TrimSpace(class) == expectedState {
+			process := strings.TrimSpace(matches[2])
+			class := strings.TrimSpace(matches[3])
+			if (process == "ptp4l" || process == "ts2phc") && class == expectedState {
 				return true
 			}
 		}

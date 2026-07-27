@@ -797,7 +797,8 @@ func initAndSolveProblems() {
 		{{int(solver.StepSameNic), 2, 1, 2}}, // step3: BC slave + master on same NIC
 		{{int(solver.StepSameLan2), 2, 2, 3}, // step4: downstream OC on BC master LAN
 			{int(solver.StepSameNic), 2, 0, 3, solver.Negative},   // GM and downstream OC on different NICs
-			{int(solver.StepSameLan2), 2, 0, 3, solver.Negative}}, // GM and downstream OC on different LANs
+			{int(solver.StepSameLan2), 2, 0, 3, solver.Negative},  // GM and downstream OC on different LANs
+			{int(solver.StepSameNode), 2, 0, 3, solver.Negative}}, // and not on the GM node (avoids co-located slave profile)
 	}
 
 	data.problems[AlgoDualNicBCWithSlavesString] = &[][][]int{
@@ -1332,13 +1333,15 @@ func CreatePtpConfigBC(policyName, nodeName, ifMasterName, ifSlaveName string, p
 	}
 
 	bcConfig := GetPtp4lConfigWithAuth(BasePtp4lConfig) + "\nboundary_clock_jbod 1\ngmCapable 0"
-	// TGMBC cascading-holdover tests require the BC to remain locked while the
-	// upstream T-GM announces CC7 (holdover) and CC248 (freerun). The default
-	// threshold of 7 rejects those classes ("Master clock quality received is
-	// greater than configured, ignoring master!"), so the BC never inherits the
-	// degraded clock class. linuxptp rejects values > 248 for this option.
+	// TGMBC cascading-holdover tests require the BC to tolerate the upstream
+	// T-GM's CC7 (holdover) while still cascading when the GM reaches CC248
+	// (freerun). Threshold 135 keeps the BC SLAVE during holdover (7 ≤ 135)
+	// but triggers LISTENING when freerun starts (248 > 135), which makes the
+	// BC's own clock class degrade — exactly what the cascade tests verify.
+	// (The default threshold of 7 also works but logs spurious "Master clock
+	// quality received is greater than configured" warnings during holdover.)
 	if GlobalConfig.PtpModeDesired == TelcoGMBC {
-		bcConfig = strings.Replace(bcConfig, "clock_class_threshold 7", "clock_class_threshold 248", 1)
+		bcConfig = strings.Replace(bcConfig, "clock_class_threshold 7", "clock_class_threshold 135", 1)
 	}
 	bcConfig = AddAuthSettings(AddInterface(bcConfig, ifSlaveName, 0))
 	bcConfig = AddAuthSettings(AddInterface(bcConfig, ifMasterName, 1))
