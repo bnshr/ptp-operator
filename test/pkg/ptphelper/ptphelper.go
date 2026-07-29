@@ -144,8 +144,10 @@ func configFileFromLogID(logID string) string {
 // field (e.g. "grandmasterIdentity" or "parentPortIdentity.clockIdentity").
 func getClockIDViaPMC(pod *corev1.Pod, configFile, field string) (string, error) {
 	re := regexp.MustCompile(`(?m)` + regexp.QuoteMeta(field) + `\s+(\S+)`)
+	// pmc treats each positional arg after options as a separate command.
+	// "GET" and "PARENT_DATA_SET" must be a single argv entry.
 	buf, _, err := pods.ExecCommand(client.Client, true, pod,
-		pkg.PtpContainerName, []string{"pmc", "-b", "0", "-u", "-f", configFile, "GET", "PARENT_DATA_SET"})
+		pkg.PtpContainerName, []string{"pmc", "-b", "0", "-u", "-f", configFile, "GET PARENT_DATA_SET"})
 	if err != nil {
 		return "", fmt.Errorf("pmc GET PARENT_DATA_SET on %s: %v", configFile, err)
 	}
@@ -1232,10 +1234,25 @@ func GetListOfWPCEnabledInterfaces(nodeName string) ([]string, string) {
 	}
 	return nil, ""
 }
+
+// nicBaseName returns the shared prefix for ports on the same NIC.
+// Legacy: ens1f0/ens1f1 → "ens1f". Netdev: ens7f0np0/ens7f1np1 → "ens7f".
+func nicBaseName(iface string) string {
+	re := regexp.MustCompile(`^(.*f)\d+(?:np\d+)?$`)
+	if m := re.FindStringSubmatch(iface); m != nil {
+		return m[1]
+	}
+	if idx := strings.LastIndex(iface, "np"); idx > 0 {
+		return iface[:idx]
+	}
+	return strings.TrimRight(iface, "0123456789")
+}
+
 func addAllInterfacesForNic(WPCifaces map[string]string, firstIface string) []string {
 	var ret = make([]string, 0)
+	base := nicBaseName(firstIface)
 	for _, iFace := range WPCifaces {
-		if strings.HasPrefix(iFace, strings.TrimSuffix(firstIface, "0")) {
+		if nicBaseName(iFace) == base {
 			ret = append(ret, iFace)
 		}
 	}

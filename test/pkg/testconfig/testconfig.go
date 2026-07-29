@@ -1072,6 +1072,9 @@ func omitPhc2sysInSimulation(phc2sysOpts *string) *string {
 }
 
 func CreatePtpConfigWPCGrandMaster(policyName string, nodeName string, ifList []string, deviceID string, label string) error {
+	if len(ifList) < 2 {
+		return fmt.Errorf("WPC GrandMaster requires at least 2 interfaces on the WPC NIC, found %d (%v) on node %s", len(ifList), ifList, nodeName)
+	}
 	ptpSchedulingPolicy := SCHED_OTHER
 	configureFifo, err := strconv.ParseBool(os.Getenv("CONFIGURE_FIFO"))
 	if err == nil && configureFifo {
@@ -1338,12 +1341,13 @@ func CreatePtpConfigBC(policyName, nodeName, ifMasterName, ifSlaveName string, p
 	}
 
 	bcConfig := GetPtp4lConfigWithAuth(BasePtp4lConfig) + "\nboundary_clock_jbod 1\ngmCapable 0"
-	// TGMBC cascading-holdover tests require the BC to remain locked while the
-	// upstream T-GM announces CC7 (holdover) and CC248 (freerun). The default
-	// threshold of 7 rejects those classes ("Master clock quality received is
-	// greater than configured, ignoring master!"), so the BC never inherits the
-	// degraded clock class. linuxptp rejects values > 248 for this option.
-	if GlobalConfig.PtpModeDesired == TelcoGMBC {
+	// TGMBC cascading-holdover and DualNicBC topologies need the BC to accept
+	// upstream announces when the GM/T-GM clock class is above the default
+	// threshold of 7 ("Master clock quality received is greater than
+	// configured, ignoring master!"). linuxptp rejects values > 248 for this
+	// option.
+	switch GlobalConfig.PtpModeDesired {
+	case TelcoGMBC, DualNICBoundaryClock, DualNICBoundaryClockHA:
 		bcConfig = strings.Replace(bcConfig, "clock_class_threshold 7", "clock_class_threshold 248", 1)
 	}
 	bcConfig = AddAuthSettings(AddInterface(bcConfig, ifSlaveName, 0))
@@ -1976,13 +1980,14 @@ func PtpConfigTelcoGM(isExtGM bool) error {
 
 		// Check the Iface has a WPC NIC associated to it
 		IfList, deviceID := ptphelper.GetListOfWPCEnabledInterfaces(gmIf0.NodeName)
-		if len(IfList) == 0 {
-			logrus.Error("WPC NIC not found in list of interfaces on the cluster")
-			return fmt.Errorf("WPC NIC not found in list of interfaces on the cluster %d", len(IfList))
+		if len(IfList) < 2 {
+			logrus.Error("WPC NIC with at least 2 interfaces not found on the cluster")
+			return fmt.Errorf("WPC NIC requires at least 2 interfaces on node %s, found %d (%v)", gmIf0.NodeName, len(IfList), IfList)
 		}
 		err := CreatePtpConfigWPCGrandMaster(pkg.PtpWPCGrandMasterPolicyName, gmIf0.NodeName, IfList, deviceID, pkg.PtpClockUnderTestNodeLabel)
 		if err != nil {
 			logrus.Errorf("Error creating Grandmaster ptpconfig: %s", err)
+			return err
 		}
 	}
 	return nil
@@ -2114,8 +2119,8 @@ func PtpConfigTGMOC() error {
 	slave1If := GlobalConfig.L2Config.GetPtpIfList()[(*data.solutions[BestSolution])[FirstSolution][slave1]]
 
 	IfList, deviceID := ptphelper.GetListOfWPCEnabledInterfaces(gmIf.NodeName)
-	if len(IfList) == 0 {
-		return fmt.Errorf("WPC NIC not found on node %s for TGMOC", gmIf.NodeName)
+	if len(IfList) < 2 {
+		return fmt.Errorf("WPC NIC requires at least 2 interfaces on node %s for TGMOC, found %d (%v)", gmIf.NodeName, len(IfList), IfList)
 	}
 
 	err := CreatePtpConfigWPCGrandMaster(pkg.PtpWPCGrandMasterPolicyName, gmIf.NodeName, IfList, deviceID, pkg.PtpGrandmasterNodeLabel)
@@ -2152,8 +2157,8 @@ func PtpConfigTGMBC() error {
 	gmIf := GlobalConfig.L2Config.GetPtpIfList()[(*data.solutions[BestSolution])[FirstSolution][grandmaster]]
 
 	IfList, deviceID := ptphelper.GetListOfWPCEnabledInterfaces(gmIf.NodeName)
-	if len(IfList) == 0 {
-		return fmt.Errorf("WPC NIC not found on node %s for TGMBC", gmIf.NodeName)
+	if len(IfList) < 2 {
+		return fmt.Errorf("WPC NIC requires at least 2 interfaces on node %s for TGMBC, found %d (%v)", gmIf.NodeName, len(IfList), IfList)
 	}
 
 	err := CreatePtpConfigWPCGrandMaster(pkg.PtpWPCGrandMasterPolicyName, gmIf.NodeName, IfList, deviceID, pkg.PtpGrandmasterNodeLabel)
