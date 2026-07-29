@@ -1011,8 +1011,10 @@ func GetFullDiscoveredConfig(namespace string, forceUpdate bool) TestConfig {
 	logrus.Infof("Getting ptp configuration for namespace:%s", namespace)
 	defer logrus.Infof("Current PTP test config=%s", &GlobalConfig)
 
-	if GlobalConfig.Status == DiscoveryFailureStatus ||
-		GlobalConfig.Status == DiscoverySuccessStatus && !forceUpdate {
+	// forceUpdate must rediscover even after a prior failure; otherwise a single
+	// discoveryFailure permanently poisons later BeforeEach refreshes.
+	if !forceUpdate &&
+		(GlobalConfig.Status == DiscoveryFailureStatus || GlobalConfig.Status == DiscoverySuccessStatus) {
 		return GlobalConfig
 	}
 
@@ -2488,6 +2490,13 @@ func discoverMode(ptpConfigClockUnderTest []*ptpv1.PtpConfig) {
 		case 2:
 			if numPhc2SysHa == 1 {
 				GlobalConfig.PtpModeDiscovered = DualNICBoundaryClockHA
+				GlobalConfig.Status = DiscoverySuccessStatus
+			} else if ptphelper.IsGnssSimConfigured() {
+				// In Kind/netdevsim, omitPhc2sysInSimulation strips Phc2sysOpts from
+				// the primary BC, so both BCs look secondary. Without an HA profile
+				// this is still DualNICBC.
+				logrus.Info("netdevsim/Kind: treating dual secondary BCs without HA as DualNICBC (phc2sys omitted)")
+				GlobalConfig.PtpModeDiscovered = DualNICBoundaryClock
 				GlobalConfig.Status = DiscoverySuccessStatus
 			}
 		}
