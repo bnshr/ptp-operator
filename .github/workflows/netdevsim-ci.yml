@@ -166,10 +166,26 @@ jobs:
             https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_$(lsb_release -rs)/ /" \
             | sudo tee /etc/apt/sources.list.d/devel:kubic:libcontainers:unstable.list > /dev/null
           sudo apt-get update
-          # crun >= 1.14.3 required with Podman 5.x (else: "OCI runtime error: crun: unknown version specified")
-          sudo apt-get install -y podman crun
+          sudo apt-get install -y podman
+          # Ubuntu noble ships crun 1.14.1; Podman 5 needs >= 1.14.3 or root hits
+          # "OCI runtime error: crun: unknown version specified" when starting registry.
+          # Install a current static binary for both the runner user and root.
+          CRUN_VER=1.28
+          ARCH=$(dpkg --print-architecture)
+          case "$ARCH" in
+            amd64) CRUN_ARCH=amd64 ;;
+            arm64) CRUN_ARCH=arm64 ;;
+            *) echo "::error::unsupported arch $ARCH for crun"; exit 1 ;;
+          esac
+          curl -fsSL -o /tmp/crun \
+            "https://github.com/containers/crun/releases/download/${CRUN_VER}/crun-${CRUN_VER}-linux-${CRUN_ARCH}"
+          sudo install -m 0755 /tmp/crun /usr/local/bin/crun
+          sudo install -m 0755 /tmp/crun /usr/bin/crun
+          hash -r
           podman --version
           crun --version
+          sudo crun --version
+          sudo podman run --rm quay.io/libpod/alpine:latest echo ok
 
       - name: Copy checkout to /root/ptp-operator
         run: sudo cp -a "$GITHUB_WORKSPACE" /root/ptp-operator
@@ -227,10 +243,26 @@ jobs:
             https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_$(lsb_release -rs)/ /" \
             | sudo tee /etc/apt/sources.list.d/devel:kubic:libcontainers:unstable.list > /dev/null
           sudo apt-get update
-          # crun >= 1.14.3 required with Podman 5.x (else: "OCI runtime error: crun: unknown version specified")
-          sudo apt-get install -y podman crun
+          sudo apt-get install -y podman
+          # Ubuntu noble ships crun 1.14.1; Podman 5 needs >= 1.14.3 or root hits
+          # "OCI runtime error: crun: unknown version specified" when starting registry.
+          # Install a current static binary for both the runner user and root.
+          CRUN_VER=1.28
+          ARCH=$(dpkg --print-architecture)
+          case "$ARCH" in
+            amd64) CRUN_ARCH=amd64 ;;
+            arm64) CRUN_ARCH=arm64 ;;
+            *) echo "::error::unsupported arch $ARCH for crun"; exit 1 ;;
+          esac
+          curl -fsSL -o /tmp/crun \
+            "https://github.com/containers/crun/releases/download/${CRUN_VER}/crun-${CRUN_VER}-linux-${CRUN_ARCH}"
+          sudo install -m 0755 /tmp/crun /usr/local/bin/crun
+          sudo install -m 0755 /tmp/crun /usr/bin/crun
+          hash -r
           podman --version
           crun --version
+          sudo crun --version
+          sudo podman run --rm quay.io/libpod/alpine:latest echo ok
 
       - name: Install OpenShift CLI (oc)
         run: |
