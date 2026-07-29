@@ -703,11 +703,12 @@ func initAndSolveProblems() {
 
 	}
 
+	// BC roles: 0=BC1Slave, 1=BC1Master, 2=GM. GM must share a LAN with the
+	// BC slave (upstream), not the master/downstream port.
 	data.problems[AlgoBCString] = &[][][]int{
 		{{int(solver.StepNil), 0, 0}},         // step1
-		{{int(solver.StepSameNic), 2, 0, 1}},  // step2
-		{{int(solver.StepSameLan2), 2, 1, 2}}, // step3
-
+		{{int(solver.StepSameNic), 2, 0, 1}},  // step2: slave+master same NIC
+		{{int(solver.StepSameLan2), 2, 0, 2}}, // step3: slave + GM same LAN
 	}
 	data.problems[AlgoBCWithSlavesString] = &[][][]int{
 		{{int(solver.StepNil), 0, 0}},         // step1
@@ -717,14 +718,17 @@ func initAndSolveProblems() {
 			{int(solver.StepSameNic), 2, 0, 3, solver.Negative},
 			{int(solver.StepSameLan2), 2, 0, 3, solver.Negative}}, // step4 - downstream slaves and grandmaster must be on different nics
 	}
+	// DualNicBC roles: 0=BC1Slave, 1=BC1Master, 2=GM, 3=BC2Master, 4=BC2Slave.
+	// GM must share a LAN with each BC *slave* (upstream). Attaching GM to the
+	// master/downstream LAN leaves both NICs freerun (clockClass 248/255).
 	data.problems[AlgoDualNicBCString] = &[][][]int{
 		{{int(solver.StepNil), 0, 0}},         // step1
-		{{int(solver.StepSameNic), 2, 0, 1}},  // step2
-		{{int(solver.StepSameLan2), 2, 1, 2}}, // step3
-		{{int(solver.StepSameNode), 2, 1, 3}, // step4
-			{int(solver.StepSameLan2), 2, 2, 3}}, // step4
+		{{int(solver.StepSameNic), 2, 0, 1}},  // step2: BC1 slave+master same NIC
+		{{int(solver.StepSameLan2), 2, 0, 2}}, // step3: BC1 slave + GM same LAN
+		{{int(solver.StepSameNode), 2, 1, 3}, // step4: both BCs on same node
+			{int(solver.StepSameLan2), 2, 2, 4}}, //        GM + BC2 slave same LAN
 		{{int(solver.StepSameNic), 2, 3, 4},
-			{int(solver.StepSameNic), 2, 1, 3, solver.Negative}}, // step5
+			{int(solver.StepSameNic), 2, 1, 3, solver.Negative}}, // step5: BC2 same NIC; != BC1 NIC
 	}
 	data.problems[AlgoTelcoGMString] = &[][][]int{
 		{{int(solver.StepIsWPCNic), 1, 0}}, // step1: first iface is WPC

@@ -889,14 +889,12 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					Skip("test only valid for Boundary clock or TGMBC in multi-node clusters")
 				}
 
-				if !fullConfig.FoundSolutions[testconfig.AlgoBCWithSlavesString] &&
-					!fullConfig.FoundSolutions[testconfig.AlgoDualNicBCWithSlavesString] &&
-					!fullConfig.FoundSolutions[testconfig.AlgoBCWithSlavesExtGMString] &&
-					!fullConfig.FoundSolutions[testconfig.AlgoDualNicBCWithSlavesExtGMString] &&
-					!fullConfig.FoundSolutions[testconfig.AlgoTelcoBCWithSlavesString] &&
-					!fullConfig.FoundSolutions[testconfig.AlgoTelcoBCWithSlavesExtGMString] &&
-					!fullConfig.FoundSolutions[testconfig.AlgoTGMBCWithSlavesString] {
-					Skip("test only valid for Boundary clock in multi-node clusters with slaves")
+				// FoundSolutions lists every solvable L2 topology, not the one that was
+				// applied. DualNIC often falls back to DualNicBC (no OC slaves) while
+				// BCWithSlaves is still "found" on the same graph — gate on the
+				// discovered downstream slave config that this test actually uses.
+				if fullConfig.DiscoveredSlave1PtpConfig == nil {
+					Skip("test only valid when a downstream OC slave ptpconfig is configured")
 				}
 				waitForWPCGMReady(fullConfig)
 				aLabel := pkg.PtpClockUnderTestNodeLabel
@@ -917,7 +915,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				Expect(err).To(BeNil())
 
 				if (fullConfig.PtpModeDiscovered == testconfig.DualNICBoundaryClock || fullConfig.PtpModeDiscovered == testconfig.DualNICBoundaryClockHA) &&
-					(fullConfig.FoundSolutions[testconfig.AlgoDualNicBCWithSlavesExtGMString] || fullConfig.FoundSolutions[testconfig.AlgoDualNicBCWithSlavesString]) {
+					fullConfig.DiscoveredSlave2PtpConfig != nil {
 					aLabel := pkg.PtpClockUnderTestNodeLabel
 					var masterIDBc2 string
 					Eventually(func() error {

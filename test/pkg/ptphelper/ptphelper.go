@@ -141,7 +141,7 @@ func configFileFromLogID(logID string) string {
 
 // getClockIDViaPMC runs "pmc GET PARENT_DATA_SET" against the given ptp4l config
 // file inside the linuxptp-daemon pod and returns the value of the requested
-// field (e.g. "grandmasterIdentity" or "parentPortIdentity.clockIdentity").
+// field (e.g. "grandmasterIdentity" or "parentPortIdentity").
 func getClockIDViaPMC(pod *corev1.Pod, configFile, field string) (string, error) {
 	re := regexp.MustCompile(`(?m)` + regexp.QuoteMeta(field) + `\s+(\S+)`)
 	// pmc treats each positional arg after options as a separate command.
@@ -212,7 +212,17 @@ func GetClockIDForeign(ptpConfigName string, label *string, nodeName *string) (s
 		return matches[len(matches)-1][clockIDForeignIndex], nil
 	}
 	logrus.Infof("GetClockIDForeign: log parsing failed for %s, falling back to pmc: %v", ptpConfigName, err)
-	return getClockIDViaPMC(pod, configFile, "parentPortIdentity.clockIdentity")
+	// linuxptp pmc prints "parentPortIdentity <clockId>-<port>", not
+	// "parentPortIdentity.clockIdentity". Strip the port suffix for callers
+	// that compare against grandmasterIdentity.
+	id, pmcErr := getClockIDViaPMC(pod, configFile, "parentPortIdentity")
+	if pmcErr != nil {
+		return "", pmcErr
+	}
+	if dash := strings.LastIndex(id, "-"); dash > 0 {
+		id = id[:dash]
+	}
+	return id, nil
 }
 
 // WaitForClockIDForeign searches the slave's log stream for a specific expected
