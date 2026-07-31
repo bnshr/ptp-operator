@@ -367,7 +367,13 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 			err := testconfig.CreatePtpConfigurationsWithRetry(3)
 			if err != nil {
 				fullConfig.Status = testconfig.DiscoveryFailureStatus
-				Skip(fmt.Sprintf("Could not create a ptp config, err=%s", err))
+				// Only topology "no … solution found" is a Skip. Operator/API/apply
+				// failures must Fail so they cannot hide behind a suite Skip.
+				if strings.Contains(err.Error(), "no solution found") ||
+					strings.Contains(err.Error(), "no T-BC solution found") {
+					Skip(fmt.Sprintf("Could not create a ptp config (insufficient topology), err=%s", err))
+				}
+				Fail(fmt.Sprintf("Could not create a ptp config, err=%s", err))
 			}
 			fullConfig = testconfig.GetFullDiscoveredConfig(pkg.PtpLinuxDaemonNamespace, false)
 			if fullConfig.Status != testconfig.DiscoverySuccessStatus {
@@ -1108,87 +1114,93 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeNil(),
 					"Primary BC slave interface must reach SLAVE state before phc2sys starts")
 
-				// Get phc2sys logs to identify which interface it's using.
+				// Current HA source = newest "selecting … out-of-domain" line from a
+				// TailLines snapshot (never Follow-first-hit). Wait until that source
+				// is a primary BC slave before fault injection — otherwise we take
+				// down an inactive iface and observe no failover.
 				const phc2sysLogPattern = `phc2sys(?m).*?:.* selecting (\w+) as out-of-domain source clock`
 				var selectedInterface string
+				var logMatches [][]string
 
-				logMatches, err := pods.GetPodLogsRegex(fullConfig.DiscoveredClockUnderTestPod.Namespace,
-					fullConfig.DiscoveredClockUnderTestPod.Name, pkg.PtpContainerName,
-					phc2sysLogPattern, false, pkg.TimeoutIn1Minute)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(len(logMatches)).To(BeNumerically(">=", 1), "Could not identify which interface phc2sys is using")
-				logrus.Infof("phc2sys log matching line: %v", logMatches[len(logMatches)-1][0])
-				selectedInterface = logMatches[len(logMatches)-1][1]
-
-				// Save it as primary interface
+				By("Waiting until phc2sys HA source is a primary BC slave")
+				Eventually(func() error {
+					matches, err := pods.GetPodLogsRegex(fullConfig.DiscoveredClockUnderTestPod.Namespace,
+						fullConfig.DiscoveredClockUnderTestPod.Name, pkg.PtpContainerName,
+						phc2sysLogPattern, false, 10*time.Second)
+					if err != nil {
+						return err
+					}
+					iface := matches[len(matches)-1][1]
+					if !slices.Contains(primaryBCSlaveInterfaces, iface) {
+						return fmt.Errorf("current HA source %s not in primary BC slaves %v (sequence=%v)",
+							iface, primaryBCSlaveInterfaces, ptptesthelper.Phc2sysMatchedInterfaces(matches))
+					}
+					selectedInterface = iface
+					logMatches = matches
+					return nil
+				}, 2*time.Minute, 5*time.Second).Should(Succeed())
+				logrus.Infof("phc2sys HA source (primary): %s; last line: %v", selectedInterface, logMatches[len(logMatches)-1][0])
 				primaryInterface := selectedInterface
-				By("Verifying the selected interface " + selectedInterface + " is a primary BC's slave interface")
-				// Check if the selected interface belongs to the primary boundary clock config
-				if !slices.Contains(primaryBCSlaveInterfaces, selectedInterface) {
-					Fail(fmt.Sprintf("Selected interface %s does not belong to the primary boundary clock config. Primary interfaces: %v", selectedInterface, primaryBCSlaveInterfaces))
-				}
 
-				// Wait for some time to ensure the regex won't match the previous log entry
-				time.Sleep(2 * time.Second)
 				ifDownTime := time.Now()
 				By("Taking down the selected interface " + selectedInterface)
-
 				nodeName := fullConfig.DiscoveredClockUnderTestPod.Spec.NodeName
 				portEngine.TurnOffAndWaitFaulty(selectedInterface, nodeName)
 
-				By("Waiting for 5 seconds for the new interface to be selected")
-				time.Sleep(5 * time.Second)
-
-				By("Verifying phc2sys switches to a different interface")
+				By("Waiting for phc2sys to fail over to a secondary BC slave")
 				var newSelectedInterface string
-				logMatches, err = pods.GetPodLogsRegexSince(fullConfig.DiscoveredClockUnderTestPod.Namespace,
-					fullConfig.DiscoveredClockUnderTestPod.Name, pkg.PtpContainerName,
-					phc2sysLogPattern, false, pkg.TimeoutIn1Minute, ifDownTime)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(len(logMatches)).To(BeNumerically(">=", 1), "Could not identify which interface phc2sys switched to after primary interface failed")
-				Expect(ptptesthelper.CountPhc2sysTransitions(logMatches, selectedInterface)).To(Equal(1),
-					fmt.Sprintf("phc2sys should have made exactly 1 transition (primary->secondary) after primary failed; port may be flapping. Sequence: %v",
-						ptptesthelper.Phc2sysMatchedInterfaces(logMatches)))
-				logrus.Infof("phc2sys log matching line: %v", logMatches[len(logMatches)-1][0])
-				newSelectedInterface = logMatches[len(logMatches)-1][1]
+				Eventually(func() error {
+					matches, err := pods.GetPodLogsRegexSince(fullConfig.DiscoveredClockUnderTestPod.Namespace,
+						fullConfig.DiscoveredClockUnderTestPod.Name, pkg.PtpContainerName,
+						phc2sysLogPattern, false, 10*time.Second, ifDownTime)
+					if err != nil {
+						return err
+					}
+					if ptptesthelper.CountPhc2sysTransitions(matches, selectedInterface) != 1 {
+						return fmt.Errorf("want exactly 1 primary->secondary transition; got %d sequence=%v",
+							ptptesthelper.CountPhc2sysTransitions(matches, selectedInterface),
+							ptptesthelper.Phc2sysMatchedInterfaces(matches))
+					}
+					iface := matches[len(matches)-1][1]
+					if !slices.Contains(secondaryBCSlaveInterfaces, iface) {
+						return fmt.Errorf("post-failover HA source %s not in secondary BC slaves %v",
+							iface, secondaryBCSlaveInterfaces)
+					}
+					newSelectedInterface = iface
+					logMatches = matches
+					return nil
+				}, pkg.TimeoutIn1Minute, 2*time.Second).Should(Succeed())
+				logrus.Infof("phc2sys HA source (secondary): %s; last line: %v", newSelectedInterface, logMatches[len(logMatches)-1][0])
 
-				// Verify that phc2sys switched to a different interface
-				Expect(newSelectedInterface).ToNot(Equal(selectedInterface), "phc2sys should have switched to a different interface")
-
-				By("Verifying the new selected interface " + newSelectedInterface + " is a secondary BC's slave interface")
-				if !slices.Contains(secondaryBCSlaveInterfaces, newSelectedInterface) {
-					Fail(fmt.Sprintf("Selected interface %s does not belong to the secondary boundary clock config. Secondary interfaces: %v", newSelectedInterface, secondaryBCSlaveInterfaces))
-				}
-
-				time.Sleep(2 * time.Second)
 				ifUpTime := time.Now()
 				By("Restoring the primary BC's slave interface " + primaryInterface)
 				portEngine.TurnOnAndWaitSlave(primaryInterface, nodeName)
 
-				By("Waiting 5 seconds for the primary BC's slave interface to be selected again")
-				time.Sleep(5 * time.Second)
-
-				// Check the new interface is the primary one.
-				// On recovery, ptp4l briefly promotes the interface to MASTER before a better master
-				// is found and it transitions to SLAVE. This causes one phc2sys transition:
-				// secondary (during brief MASTER state) -> primary (on SLAVE transition).
-				// More than one transition indicates flapping (e.g. primary->secondary->primary).
-				logMatches, err = pods.GetPodLogsRegexSince(fullConfig.DiscoveredClockUnderTestPod.Namespace,
-					fullConfig.DiscoveredClockUnderTestPod.Name, pkg.PtpContainerName,
-					phc2sysLogPattern, false, pkg.TimeoutIn1Minute, ifUpTime)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(len(logMatches)).To(BeNumerically(">=", 1), "Could not identify which interface phc2sys switched to after primary interface recovered")
-				Expect(ptptesthelper.CountPhc2sysTransitions(logMatches, newSelectedInterface)).To(Equal(1),
-					fmt.Sprintf("phc2sys should have made exactly 1 transition (secondary->primary) since primary recovered; "+
-						"0 means phc2sys never switched back, >1 indicates flapping. Sequence: %v",
-						ptptesthelper.Phc2sysMatchedInterfaces(logMatches)))
-				logrus.Infof("phc2sys log matching line: %v", logMatches[len(logMatches)-1][0])
-				selectedInterface = logMatches[len(logMatches)-1][1]
-
-				By("Verifying the selected interface " + selectedInterface + " is the original primary BC's slave interface " + primaryInterface)
-				if selectedInterface != primaryInterface {
-					Fail(fmt.Sprintf("Selected interface %s is not the original primary interface %s", selectedInterface, primaryInterface))
-				}
+				// On recovery, ptp4l briefly promotes the interface to MASTER before a
+				// better master is found and it transitions to SLAVE. That yields one
+				// phc2sys transition: secondary -> primary. >1 indicates flapping.
+				By("Waiting for phc2sys to return to the original primary BC slave")
+				Eventually(func() error {
+					matches, err := pods.GetPodLogsRegexSince(fullConfig.DiscoveredClockUnderTestPod.Namespace,
+						fullConfig.DiscoveredClockUnderTestPod.Name, pkg.PtpContainerName,
+						phc2sysLogPattern, false, 10*time.Second, ifUpTime)
+					if err != nil {
+						return err
+					}
+					if ptptesthelper.CountPhc2sysTransitions(matches, newSelectedInterface) != 1 {
+						return fmt.Errorf("want exactly 1 secondary->primary transition; got %d sequence=%v",
+							ptptesthelper.CountPhc2sysTransitions(matches, newSelectedInterface),
+							ptptesthelper.Phc2sysMatchedInterfaces(matches))
+					}
+					iface := matches[len(matches)-1][1]
+					if iface != primaryInterface {
+						return fmt.Errorf("recovered HA source %s != original primary %s", iface, primaryInterface)
+					}
+					selectedInterface = iface
+					logMatches = matches
+					return nil
+				}, pkg.TimeoutIn1Minute, 2*time.Second).Should(Succeed())
+				logrus.Infof("phc2sys HA source restored: %s; last line: %v", selectedInterface, logMatches[len(logMatches)-1][0])
 			})
 
 			// OCPBUGS-66407 / OCPBUGS-59883: Verify clockClass reported by Event API and

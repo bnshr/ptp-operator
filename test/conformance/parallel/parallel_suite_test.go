@@ -56,15 +56,26 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 
 	// discovers valid ptp configurations based on clock type
 	err = testconfig.CreatePtpConfigurationsWithRetry(3)
-	Expect(err).To(BeNil(), "Could not create a ptp config")
+	if err != nil {
+		// Only topology "no … solution found" is a Skip (insufficient fabric).
+		// Operator/API/apply failures must still Fail BeforeSuite.
+		if strings.Contains(err.Error(), "no solution found") ||
+			strings.Contains(err.Error(), "no T-BC solution found") {
+			Skip(fmt.Sprintf("Could not create a ptp config (insufficient topology), err=%s", err))
+		}
+		Fail(fmt.Sprintf("Could not create a ptp config, err=%s", err))
+	}
 
 	By("Refreshing configuration", func() {
 		ptphelper.WaitForPtpDaemonToExist()
 		fullConfig = testconfig.GetFullDiscoveredConfig(pkg.PtpLinuxDaemonNamespace, true)
 	})
-	Expect(fullConfig.Status).To(Equal(testconfig.DiscoverySuccessStatus), "parallel suite requires successful PTP discovery")
-	Expect(fullConfig.DiscoveredClockUnderTestPod).NotTo(BeNil(),
-		"clock-under-test pod missing; label node with "+pkg.PtpClockUnderTestNodeLabel)
+	if fullConfig.Status != testconfig.DiscoverySuccessStatus {
+		Skip("parallel suite requires successful PTP discovery")
+	}
+	if fullConfig.DiscoveredClockUnderTestPod == nil {
+		Skip("clock-under-test pod missing; label node with " + pkg.PtpClockUnderTestNodeLabel)
+	}
 	ptphelper.RestartPTPDaemon()
 
 	isConsumerReady := true
