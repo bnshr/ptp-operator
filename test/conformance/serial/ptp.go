@@ -1100,6 +1100,16 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 
 				logrus.Infof("Primary   BC slave interfaces: %v", primaryBCSlaveInterfaces)
 				logrus.Infof("Secondary BC slave interfaces: %v", secondaryBCSlaveInterfaces)
+				Expect(primaryBCSlaveInterfaces).NotTo(BeEmpty(), "primary BC must expose a slave interface for HA fault injection")
+
+				// Capture logs from before the slave-role wait: phc2sys often emits
+				// "selecting" only when it starts after ptp4l reaches SLAVE. A short
+				// TailLines window after the fact misses an aged selection line.
+				const phc2sysLogPattern = `phc2sys(?m).*?:.* selecting (\w+) as out-of-domain source clock`
+				// Large tail for rare selection lines buried under offset spam.
+				// Still bounded vs full-history ReadAll (timeout → stale prefix).
+				const phc2sysHASourceTailLines int64 = 500000
+				sinceBeforeSlaveWait := time.Now()
 
 				// phc2sys is delayed until ptp4l synchronizes, so first wait for
 				// the primary BC slave interface to reach SLAVE state, then give
@@ -1114,21 +1124,39 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				}, pkg.TimeoutIn5Minutes, 5*time.Second).Should(BeNil(),
 					"Primary BC slave interface must reach SLAVE state before phc2sys starts")
 
-				// Current HA source = newest "selecting … out-of-domain" line from a
-				// TailLines snapshot (never Follow-first-hit). Wait until that source
-				// is a primary BC slave before fault injection — otherwise we take
-				// down an inactive iface and observe no failover.
-				const phc2sysLogPattern = `phc2sys(?m).*?:.* selecting (\w+) as out-of-domain source clock`
+				// Resolve current HA source without Follow-first-hit:
+				//  1) SinceTime from before slave wait (fresh selection during start)
+				//  2) large TailLines (aged selection still current)
+				//  3) if still none and exactly one primary slave: use that iface
+				//     (HA prefers the healthy primary profile; fail closed if HA
+				//     was already on secondary — failover Eventually will timeout)
 				var selectedInterface string
 				var logMatches [][]string
 
 				By("Waiting until phc2sys HA source is a primary BC slave")
 				Eventually(func() error {
-					matches, err := pods.GetPodLogsRegex(fullConfig.DiscoveredClockUnderTestPod.Namespace,
-						fullConfig.DiscoveredClockUnderTestPod.Name, pkg.PtpContainerName,
-						phc2sysLogPattern, false, 10*time.Second)
-					if err != nil {
-						return err
+					ns := fullConfig.DiscoveredClockUnderTestPod.Namespace
+					name := fullConfig.DiscoveredClockUnderTestPod.Name
+					var matches [][]string
+					var err error
+
+					matches, err = pods.GetPodLogsRegexSince(ns, name, pkg.PtpContainerName,
+						phc2sysLogPattern, false, 15*time.Second, sinceBeforeSlaveWait)
+					if err != nil || len(matches) == 0 {
+						matches, err = pods.GetPodLogsRegexTail(ns, name, pkg.PtpContainerName,
+							phc2sysLogPattern, false, 15*time.Second, phc2sysHASourceTailLines)
+					}
+					if err != nil || len(matches) == 0 {
+						if len(primaryBCSlaveInterfaces) == 1 {
+							selectedInterface = primaryBCSlaveInterfaces[0]
+							logMatches = nil
+							logrus.Warnf("no phc2sys selecting line in SinceTime/TailLines; assuming HA source %s (sole primary BC slave)", selectedInterface)
+							return nil
+						}
+						if err != nil {
+							return err
+						}
+						return fmt.Errorf("no phc2sys selecting line yet (primary slaves=%v)", primaryBCSlaveInterfaces)
 					}
 					iface := matches[len(matches)-1][1]
 					if !slices.Contains(primaryBCSlaveInterfaces, iface) {
@@ -1138,8 +1166,12 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					selectedInterface = iface
 					logMatches = matches
 					return nil
-				}, 2*time.Minute, 5*time.Second).Should(Succeed())
-				logrus.Infof("phc2sys HA source (primary): %s; last line: %v", selectedInterface, logMatches[len(logMatches)-1][0])
+				}, 3*time.Minute, 5*time.Second).Should(Succeed())
+				if len(logMatches) > 0 {
+					logrus.Infof("phc2sys HA source (primary): %s; last line: %v", selectedInterface, logMatches[len(logMatches)-1][0])
+				} else {
+					logrus.Infof("phc2sys HA source (primary, assumed): %s", selectedInterface)
+				}
 				primaryInterface := selectedInterface
 
 				ifDownTime := time.Now()

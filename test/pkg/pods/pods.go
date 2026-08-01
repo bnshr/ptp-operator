@@ -140,8 +140,10 @@ func compileLogRegex(regex string, isLiteralText bool) *regexp.Regexp {
 //
 // Non-follow only: Follow + find-first returns the oldest hit in the stream,
 // which is wrong for "current phc2sys HA source" when daemon logs are large.
-// TailLines (or SinceTime) avoids ReadAll of multi-100MB histories that hit
-// the client timeout and previously forced that Follow fallback.
+// TailLines (or SinceTime) bounds the read so the client can finish the stream.
+//
+// Incomplete reads are hard errors: the API delivers oldest→newest, so a
+// truncated buffer's last match is not the latest line and must not be trusted.
 func snapshotPodLogsRegex(namespace, podName, containerName string, r *regexp.Regexp, tailLines *int64, since *time.Time) (matches [][]string, err error) {
 	opts := corev1.PodLogOptions{
 		Container: containerName,
@@ -163,17 +165,12 @@ func snapshotPodLogsRegex(namespace, podName, containerName string, r *regexp.Re
 	defer stream.Close()
 
 	logContent, readErr := io.ReadAll(stream)
-	// Prefer matches from whatever bytes arrived; a mid-stream timeout on a
-	// large tail still often includes the newest lines (API sends oldest→newest).
-	if len(logContent) == 0 {
-		if readErr != nil {
-			return nil, fmt.Errorf("failed reading log snapshot for %s/%s container=%s: %w", namespace, podName, containerName, readErr)
-		}
-		return nil, nil
-	}
 	if readErr != nil {
-		logrus.Warnf("log snapshot for %s/%s container=%s incomplete (%v); matching %d bytes",
-			namespace, podName, containerName, readErr, len(logContent))
+		return nil, fmt.Errorf("incomplete log snapshot for %s/%s container=%s (%d bytes): %w",
+			namespace, podName, containerName, len(logContent), readErr)
+	}
+	if len(logContent) == 0 {
+		return nil, nil
 	}
 	return r.FindAllStringSubmatch(string(logContent), -1), nil
 }
@@ -216,9 +213,19 @@ func GetPodLogsRegexSince(namespace string, podName string, containerName, regex
 // Follow-from-beginning / first-match semantics (unsafe with large daemon logs).
 func GetPodLogsRegex(namespace string, podName string, containerName, regex string, isLiteralText bool, timeout time.Duration) (matches [][]string, err error) {
 	// Bound the snapshot so ReadAll cannot stall on multi-100MB daemon logs.
-	// Selection / profile lines exercised by conformance are recent; callers
-	// that need absolute history should use GetPodLogsRegexSince.
+	// Rare lines that may be older (e.g. phc2sys HA "selecting") need
+	// GetPodLogsRegexTail or GetPodLogsRegexSince instead.
 	var tailLines int64 = 20000
+	return pollPodLogsRegex(namespace, podName, containerName, compileLogRegex(regex, isLiteralText), timeout, &tailLines, nil)
+}
+
+// GetPodLogsRegexTail is GetPodLogsRegex with an explicit TailLines bound.
+// Use a large tail for rare log lines that remain the current truth (e.g.
+// phc2sys HA source selection) without draining the entire daemon history.
+func GetPodLogsRegexTail(namespace string, podName string, containerName, regex string, isLiteralText bool, timeout time.Duration, tailLines int64) (matches [][]string, err error) {
+	if tailLines <= 0 {
+		return nil, fmt.Errorf("tailLines must be > 0")
+	}
 	return pollPodLogsRegex(namespace, podName, containerName, compileLogRegex(regex, isLiteralText), timeout, &tailLines, nil)
 }
 
