@@ -1404,6 +1404,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				By("Refreshing configuration", func() {
 					ptphelper.WaitForPtpDaemonToExist()
 					fullConfig = testconfig.GetFullDiscoveredConfig(pkg.PtpLinuxDaemonNamespace, true)
+					requireDiscoveryAfterRefresh(&fullConfig, testconfig.None)
 					podsRunningPTP4l, err := testconfig.GetPodsRunningPTP4l(&fullConfig)
 					Expect(err).NotTo(HaveOccurred())
 					ptphelper.WaitForPtpDaemonToBeReady(podsRunningPTP4l)
@@ -2394,12 +2395,11 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				By("Refreshing configuration", func() {
 					ptphelper.WaitForPtpDaemonToExist()
 					fullConfig = testconfig.GetFullDiscoveredConfig(pkg.PtpLinuxDaemonNamespace, true)
+					requireDiscoveryAfterRefresh(&fullConfig, testconfig.TelcoGrandMasterClock)
 					podsRunningPTP4l, err := testconfig.GetPodsRunningPTP4l(&fullConfig)
 					Expect(err).NotTo(HaveOccurred())
 					ptphelper.WaitForPtpDaemonToBeReady(podsRunningPTP4l)
-
 				})
-
 			})
 			It("is verifying WPC GM state based on logs", func() {
 
@@ -2417,13 +2417,16 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					clockClassRe := regexp.MustCompile(clockClassPattern)
 
 					Eventually(func() ([][]string, error) {
-						logMatches, err := pods.GetPodLogsRegex(
+						// CLOCK_CLASS_CHANGE is rare; a short TailLines window often
+						// misses it under dense daemon logs (same class of bug as HA).
+						logMatches, err := pods.GetPodLogsRegexTail(
 							openshiftPtpNamespace,
 							fullConfig.DiscoveredClockUnderTestPod.Name,
 							pkg.PtpContainerName,
 							clockClassRe.String(),
-							false,                // don't follow logs
-							pkg.TimeoutIn1Minute, // inner timeout for single call (can be shorter if you want)
+							false,
+							pkg.TimeoutIn1Minute,
+							500000,
 						)
 						return logMatches, err
 					}, pkg.TimeoutIn5Minutes, pkg.Timeout10Seconds).Should( // <-- total wait 5 mins, check every 10s
@@ -2716,6 +2719,8 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				if ptphelper.UseGnssSimulation() {
 					Skip("ubxtool/GNSS loss tests require hardware GNSS; gnss-sim PTY is in use")
 				}
+				fullConfig = testconfig.GetFullDiscoveredConfig(pkg.PtpLinuxDaemonNamespace, true)
+				requireDiscoveryAfterRefresh(&fullConfig, testconfig.TelcoGrandMasterClock)
 			})
 			/*
 				Step | Action
@@ -2781,6 +2786,8 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				if ptphelper.UseGnssSimulation() {
 					Skip("ts2phc termination GM event tests target hardware GNSS path")
 				}
+				fullConfig = testconfig.GetFullDiscoveredConfig(pkg.PtpLinuxDaemonNamespace, true)
+				requireDiscoveryAfterRefresh(&fullConfig, testconfig.TelcoGrandMasterClock)
 			})
 
 			It("Continuously terminating ts2phc triggers FREERUN event and then recovers to LOCKED", func() {
@@ -2860,6 +2867,8 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				if ptphelper.UseGnssSimulation() {
 					Skip("WPC GM v2 GNSS reboot events expect ubxtool/hardware GNSS (use Simulated T-GM events when gnss-sim is active)")
 				}
+				fullConfig = testconfig.GetFullDiscoveredConfig(pkg.PtpLinuxDaemonNamespace, true)
+				requireDiscoveryAfterRefresh(&fullConfig, testconfig.TelcoGrandMasterClock)
 
 				// Set up consumer pod for event monitoring
 				if fullConfig.DiscoveredClockUnderTestPod != nil {
@@ -2966,6 +2975,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				By("Refreshing configuration", func() {
 					ptphelper.WaitForPtpDaemonToExist()
 					fullConfig = testconfig.GetFullDiscoveredConfig(pkg.PtpLinuxDaemonNamespace, true)
+					requireDiscoveryAfterRefresh(&fullConfig, testconfig.TelcoGrandMasterClock)
 					podsRunningPTP4l, err := testconfig.GetPodsRunningPTP4l(&fullConfig)
 					Expect(err).NotTo(HaveOccurred())
 					ptphelper.WaitForPtpDaemonToBeReady(podsRunningPTP4l)
@@ -4661,12 +4671,33 @@ func getProcessStatusByProcess(metricsText, process string) (string, bool) {
 // ensureGMPtpConfigRestored is a DeferCleanup helper that recreates the GM PtpConfig
 // if it was deleted during a test, ensuring subsequent tests have a valid configuration.
 func ensureGMPtpConfigRestored() {
+	if testconfig.GlobalConfig.DiscoveredGrandMasterPtpConfig == nil {
+		logrus.Warn("ensureGMPtpConfigRestored: DiscoveredGrandMasterPtpConfig is nil; cannot recreate GM PtpConfig")
+		return
+	}
 	tempPtpConfig := (*ptpv1.PtpConfig)(testconfig.GlobalConfig.DiscoveredGrandMasterPtpConfig)
 	tempPtpConfig.SetResourceVersion("")
 	_, err := client.Client.PtpV1Interface.PtpConfigs(pkg.PtpLinuxDaemonNamespace).Create(
 		context.Background(), tempPtpConfig, metav1.CreateOptions{})
 	if err != nil && !kerrors.IsAlreadyExists(err) {
 		Expect(err).NotTo(HaveOccurred())
+	}
+}
+
+// requireDiscoveryAfterRefresh skips when a forced rediscovery lost PtpConfigs or
+// the clock-under-test pod (common when parallel BeforeSuite clean.All races serial).
+func requireDiscoveryAfterRefresh(cfg *testconfig.TestConfig, wantMode testconfig.PTPMode) {
+	if cfg.Status != testconfig.DiscoverySuccessStatus {
+		Skip(fmt.Sprintf("PTP discovery failed after refresh (status=%s, mode=%s); "+
+			"PtpConfigs may have been wiped by a concurrent suite",
+			cfg.Status, cfg.PtpModeDiscovered))
+	}
+	if cfg.DiscoveredClockUnderTestPod == nil {
+		Skip("DiscoveredClockUnderTestPod is nil after refresh")
+	}
+	if wantMode != testconfig.None && cfg.PtpModeDiscovered != wantMode {
+		Skip(fmt.Sprintf("discovered mode %s != required %s after refresh",
+			cfg.PtpModeDiscovered, wantMode))
 	}
 }
 

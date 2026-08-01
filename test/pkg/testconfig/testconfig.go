@@ -2384,6 +2384,10 @@ func discoverPTPConfiguration(namespace string) {
 
 func resetConfig() {
 	GlobalConfig.Status = DiscoveryFailureStatus
+	// Clear discovered mode so a failed rediscovery cannot leave a stale
+	// PtpModeDiscovered (e.g. TGM) that lets later Its run and panic on nil pods
+	// after another suite wiped PtpConfigs mid-run.
+	GlobalConfig.PtpModeDiscovered = None
 	GlobalConfig.DiscoveredClockUnderTestPod = nil
 	GlobalConfig.DiscoveredClockUnderTestPtpConfig = nil
 	GlobalConfig.DiscoveredClockUnderTestSecondaryPtpConfig = nil
