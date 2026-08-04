@@ -3459,12 +3459,22 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				Expect(simErr).ToNot(HaveOccurred())
 				defer func() { _ = ptphelper.GNSSSimSignalRestore() }()
 
-				By("Waiting for GM clock class to degrade in metrics before collecting events")
+				// Assert holdover cascade immediately. A long event-collection wait
+				// after this lets gnss-sim leave HOLDOVER (CC7) for FREERUN (CC248),
+				// so a later CC7-only PMC check would miss the holdover window.
+				By("Waiting for GM clock class to reach CC7 (holdover) in metrics")
 				Eventually(func() bool {
 					buf, _, _ := pods.ExecCommand(client.Client, true, gmPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
 					return checkClockClassInMetrics(buf.String(), "7")
 				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(BeTrue(),
 					"Expected GM clock class to reach CC7 (holdover) before collecting events")
+
+				By("Verifying BC parent gm.ClockClass cascades to CC7 via PMC while still in holdover")
+				Eventually(func() bool {
+					cc, err := ptptesthelper.GetClockClassViaPMC(fullConfig, "/var/run/ptp4l.0.config")
+					return err == nil && cc == int(fbprotocol.ClockClass7)
+				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(BeTrue(),
+					"Expected BC parent gm.ClockClass to cascade to CC7 after GM holdover")
 
 				events := getGMEvents(subs.GNSS, subs.CLOCKCLASS, subs.LOCKSTATE, 30*time.Second)
 				fmt.Fprintf(GinkgoWriter, "TGMBC GM loss events: %v\n", events)
@@ -3474,13 +3484,6 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				By("Verifying GM PTP state HOLDOVER")
 				verifyEvent(events[ptpEvent.PtpStateChange], ptpEvent.HOLDOVER)
 				stopMonitor(term)
-
-				By("Verifying BC parent gm.ClockClass cascades to CC7 via PMC")
-				Eventually(func() bool {
-					cc, err := ptptesthelper.GetClockClassViaPMC(fullConfig, "/var/run/ptp4l.0.config")
-					return err == nil && cc == int(fbprotocol.ClockClass7)
-				}, pkg.TimeoutIn10Minutes, 2*time.Second).Should(BeTrue(),
-					"Expected BC parent gm.ClockClass to cascade to CC7 after GM holdover event")
 
 				term2, err2 := event.MonitorPodLogsRegex()
 				defer func() { stopMonitor(term2) }()
