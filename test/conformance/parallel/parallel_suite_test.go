@@ -81,12 +81,9 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 			fullConfig = testconfig.GetFullDiscoveredConfig(pkg.PtpLinuxDaemonNamespace, true)
 		})
 	}
-	if fullConfig.Status != testconfig.DiscoverySuccessStatus {
-		Skip("parallel suite requires successful PTP discovery")
-	}
-	if fullConfig.DiscoveredClockUnderTestPod == nil {
-		Skip("clock-under-test pod missing; label node with " + pkg.PtpClockUnderTestNodeLabel)
-	}
+	Expect(fullConfig.Status).To(Equal(testconfig.DiscoverySuccessStatus), "parallel suite requires successful PTP discovery")
+	Expect(fullConfig.DiscoveredClockUnderTestPod).NotTo(BeNil(),
+		"clock-under-test pod missing; label node with "+pkg.PtpClockUnderTestNodeLabel)
 	// Avoid RestartPTPDaemon when reusing serial configs: a daemon bounce mid-serial
 	// races the same way as clean.All. Only restart after we created configs.
 	if !reusedSerialConfigs {

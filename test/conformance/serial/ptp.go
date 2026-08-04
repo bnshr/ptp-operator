@@ -325,9 +325,6 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 			}
 			ptpOperatorConfig.Spec.EventConfig.EnableEventPublisher = true
 			_, err = client.Client.PtpV1Interface.PtpOperatorConfigs(pkg.PtpLinuxDaemonNamespace).Update(context.Background(), ptpOperatorConfig, metav1.UpdateOptions{})
-			if err != nil && kerrors.IsInternalError(err) && strings.Contains(err.Error(), "webhook") {
-				Skip("Skipping: PtpOperatorConfig admission webhook is not available in this environment")
-			}
 			Expect(err).ToNot(HaveOccurred())
 
 			By("Reading back and verifying EnableEventPublisher is true")
@@ -381,7 +378,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 - the ptpconfig has a %s label only in the recommend section (no node section)
 - the node running the clock under test is label with: %s`, pkg.PtpClockUnderTestNodeLabel, pkg.PtpClockUnderTestNodeLabel)
 
-				Skip("Failed to find a valid ptp slave configuration")
+				Fail("Failed to find a valid ptp slave configuration")
 
 			}
 			if fullConfig.PtpModeDesired != testconfig.Discovery {
@@ -1128,8 +1125,6 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				//  1) SinceTime from before slave wait (fresh selection during start)
 				//  2) large TailLines (aged selection still current)
 				//  3) if still none and exactly one primary slave: use that iface
-				//     (HA prefers the healthy primary profile; fail closed if HA
-				//     was already on secondary — failover Eventually will timeout)
 				var selectedInterface string
 				var logMatches [][]string
 
@@ -1174,65 +1169,64 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				}
 				primaryInterface := selectedInterface
 
+				// Wait so the regex won't match the previous log entry
+				time.Sleep(2 * time.Second)
 				ifDownTime := time.Now()
 				By("Taking down the selected interface " + selectedInterface)
 				nodeName := fullConfig.DiscoveredClockUnderTestPod.Spec.NodeName
 				portEngine.TurnOffAndWaitFaulty(selectedInterface, nodeName)
 
-				By("Waiting for phc2sys to fail over to a secondary BC slave")
-				var newSelectedInterface string
-				Eventually(func() error {
-					matches, err := pods.GetPodLogsRegexSince(fullConfig.DiscoveredClockUnderTestPod.Namespace,
-						fullConfig.DiscoveredClockUnderTestPod.Name, pkg.PtpContainerName,
-						phc2sysLogPattern, false, 10*time.Second, ifDownTime)
-					if err != nil {
-						return err
-					}
-					if ptptesthelper.CountPhc2sysTransitions(matches, selectedInterface) != 1 {
-						return fmt.Errorf("want exactly 1 primary->secondary transition; got %d sequence=%v",
-							ptptesthelper.CountPhc2sysTransitions(matches, selectedInterface),
-							ptptesthelper.Phc2sysMatchedInterfaces(matches))
-					}
-					iface := matches[len(matches)-1][1]
-					if !slices.Contains(secondaryBCSlaveInterfaces, iface) {
-						return fmt.Errorf("post-failover HA source %s not in secondary BC slaves %v",
-							iface, secondaryBCSlaveInterfaces)
-					}
-					newSelectedInterface = iface
-					logMatches = matches
-					return nil
-				}, pkg.TimeoutIn1Minute, 2*time.Second).Should(Succeed())
-				logrus.Infof("phc2sys HA source (secondary): %s; last line: %v", newSelectedInterface, logMatches[len(logMatches)-1][0])
+				By("Waiting for 5 seconds for the new interface to be selected")
+				time.Sleep(5 * time.Second)
 
+				By("Verifying phc2sys switches to a different interface")
+				var newSelectedInterface string
+				var err error
+				logMatches, err = pods.GetPodLogsRegexSince(fullConfig.DiscoveredClockUnderTestPod.Namespace,
+					fullConfig.DiscoveredClockUnderTestPod.Name, pkg.PtpContainerName,
+					phc2sysLogPattern, false, pkg.TimeoutIn1Minute, ifDownTime)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(logMatches)).To(BeNumerically(">=", 1), "Could not identify which interface phc2sys switched to after primary interface failed")
+				Expect(ptptesthelper.CountPhc2sysTransitions(logMatches, selectedInterface)).To(Equal(1),
+					fmt.Sprintf("phc2sys should have made exactly 1 transition (primary->secondary) after primary failed; port may be flapping. Sequence: %v",
+						ptptesthelper.Phc2sysMatchedInterfaces(logMatches)))
+				logrus.Infof("phc2sys log matching line: %v", logMatches[len(logMatches)-1][0])
+				newSelectedInterface = logMatches[len(logMatches)-1][1]
+
+				Expect(newSelectedInterface).ToNot(Equal(selectedInterface), "phc2sys should have switched to a different interface")
+				By("Verifying the new selected interface " + newSelectedInterface + " is a secondary BC's slave interface")
+				if !slices.Contains(secondaryBCSlaveInterfaces, newSelectedInterface) {
+					Fail(fmt.Sprintf("Selected interface %s does not belong to the secondary boundary clock config. Secondary interfaces: %v", newSelectedInterface, secondaryBCSlaveInterfaces))
+				}
+
+				time.Sleep(2 * time.Second)
 				ifUpTime := time.Now()
 				By("Restoring the primary BC's slave interface " + primaryInterface)
 				portEngine.TurnOnAndWaitSlave(primaryInterface, nodeName)
 
-				// On recovery, ptp4l briefly promotes the interface to MASTER before a
-				// better master is found and it transitions to SLAVE. That yields one
-				// phc2sys transition: secondary -> primary. >1 indicates flapping.
-				By("Waiting for phc2sys to return to the original primary BC slave")
-				Eventually(func() error {
-					matches, err := pods.GetPodLogsRegexSince(fullConfig.DiscoveredClockUnderTestPod.Namespace,
-						fullConfig.DiscoveredClockUnderTestPod.Name, pkg.PtpContainerName,
-						phc2sysLogPattern, false, 10*time.Second, ifUpTime)
-					if err != nil {
-						return err
-					}
-					if ptptesthelper.CountPhc2sysTransitions(matches, newSelectedInterface) != 1 {
-						return fmt.Errorf("want exactly 1 secondary->primary transition; got %d sequence=%v",
-							ptptesthelper.CountPhc2sysTransitions(matches, newSelectedInterface),
-							ptptesthelper.Phc2sysMatchedInterfaces(matches))
-					}
-					iface := matches[len(matches)-1][1]
-					if iface != primaryInterface {
-						return fmt.Errorf("recovered HA source %s != original primary %s", iface, primaryInterface)
-					}
-					selectedInterface = iface
-					logMatches = matches
-					return nil
-				}, pkg.TimeoutIn1Minute, 2*time.Second).Should(Succeed())
-				logrus.Infof("phc2sys HA source restored: %s; last line: %v", selectedInterface, logMatches[len(logMatches)-1][0])
+				By("Waiting 5 seconds for the primary BC's slave interface to be selected again")
+				time.Sleep(5 * time.Second)
+
+				// On recovery, ptp4l briefly promotes the interface to MASTER before a better master
+				// is found and it transitions to SLAVE. This causes one phc2sys transition:
+				// secondary (during brief MASTER state) -> primary (on SLAVE transition).
+				// More than one transition indicates flapping (e.g. primary->secondary->primary).
+				logMatches, err = pods.GetPodLogsRegexSince(fullConfig.DiscoveredClockUnderTestPod.Namespace,
+					fullConfig.DiscoveredClockUnderTestPod.Name, pkg.PtpContainerName,
+					phc2sysLogPattern, false, pkg.TimeoutIn1Minute, ifUpTime)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(logMatches)).To(BeNumerically(">=", 1), "Could not identify which interface phc2sys switched to after primary interface recovered")
+				Expect(ptptesthelper.CountPhc2sysTransitions(logMatches, newSelectedInterface)).To(Equal(1),
+					fmt.Sprintf("phc2sys should have made exactly 1 transition (secondary->primary) since primary recovered; "+
+						"0 means phc2sys never switched back, >1 indicates flapping. Sequence: %v",
+						ptptesthelper.Phc2sysMatchedInterfaces(logMatches)))
+				logrus.Infof("phc2sys log matching line: %v", logMatches[len(logMatches)-1][0])
+				selectedInterface = logMatches[len(logMatches)-1][1]
+
+				By("Verifying the selected interface " + selectedInterface + " is the original primary BC's slave interface " + primaryInterface)
+				if selectedInterface != primaryInterface {
+					Fail(fmt.Sprintf("Selected interface %s is not the original primary interface %s", selectedInterface, primaryInterface))
+				}
 			})
 
 			// OCPBUGS-66407 / OCPBUGS-59883: Verify clockClass reported by Event API and
@@ -2876,10 +2870,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 					if nodeName != "" {
 						logrus.Info("Deploy consumer app for testing event API v2")
 						err := event.CreateConsumerApp(nodeName)
-						if err != nil {
-							logrus.Errorf("PTP events are not available due to consumer app creation error err=%s", err)
-							Skip("Consumer app setup failed")
-						}
+						Expect(err).ToNot(HaveOccurred(), "Consumer app setup failed")
 
 						// Wait a bit more for the consumer pod to be fully ready
 						logrus.Info("Waiting for consumer pod to be fully ready...")
@@ -3209,10 +3200,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				if nodeName != "" {
 					logrus.Info("Deploy consumer app for simulated T-GM event API v2")
 					err := event.CreateConsumerApp(nodeName)
-					if err != nil {
-						logrus.Errorf("PTP events not available: consumer app err=%s", err)
-						Skip("Consumer app setup failed")
-					}
+					Expect(err).ToNot(HaveOccurred(), "Consumer app setup failed")
 					time.Sleep(10 * time.Second)
 					event.InitPubSub()
 				}
@@ -3345,19 +3333,19 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				}, 5*time.Minute, 2*time.Second).Should(Equal("HOLDOVER"),
 					"Expected GM DPLL to enter HOLDOVER after GNSS signal loss")
 
-				By("waiting for GM clock class to degrade in metrics (confirms DPLL→ptp4l pipeline)")
+				By("waiting for GM clock class to reach CC7 (holdover) in metrics")
 				Eventually(func() bool {
 					buf, _, _ := pods.ExecCommand(client.Client, true, gmPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
-					return checkClockClassInMetrics(buf.String(), "7") || checkClockClassInMetrics(buf.String(), "248")
+					return checkClockClassInMetrics(buf.String(), "7")
 				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(BeTrue(),
-					"Expected GM clock class to degrade to CC7/CC248 in Prometheus metrics after DPLL HOLDOVER")
+					"Expected GM clock class to reach CC7 (holdover) in Prometheus metrics after DPLL HOLDOVER")
 
-				By("waiting for BC parent gm.ClockClass to cascade-degrade from Locked (6)")
+				By("waiting for BC parent gm.ClockClass to cascade to CC7 (holdover)")
 				Eventually(func() bool {
 					cc, err := ptptesthelper.GetClockClassViaPMC(fullConfig, "/var/run/ptp4l.0.config")
-					return err == nil && (cc == int(fbprotocol.ClockClass7) || cc == ClockClassFreerun)
+					return err == nil && cc == int(fbprotocol.ClockClass7)
 				}, pkg.TimeoutIn10Minutes, 2*time.Second).Should(BeTrue(),
-					"Expected BC parent gm.ClockClass to cascade-degrade after upstream GM GNSS loss")
+					"Expected BC parent gm.ClockClass to cascade to CC7 after upstream GM GNSS loss")
 
 				By("restoring GNSS signal via gnss-sim API")
 				simErr = ptphelper.GNSSSimSignalRestore()
@@ -3416,10 +3404,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				if nodeName != "" {
 					logrus.Info("Deploy consumer app for TGMBC event API v2")
 					err := event.CreateConsumerApp(nodeName)
-					if err != nil {
-						logrus.Errorf("PTP events not available: consumer app err=%s", err)
-						Skip("Consumer app setup failed")
-					}
+					Expect(err).ToNot(HaveOccurred(), "Consumer app setup failed")
 					time.Sleep(10 * time.Second)
 					event.InitPubSub()
 				}
@@ -3477,9 +3462,9 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				By("Waiting for GM clock class to degrade in metrics before collecting events")
 				Eventually(func() bool {
 					buf, _, _ := pods.ExecCommand(client.Client, true, gmPod, pkg.PtpContainerName, []string{"curl", pkg.MetricsEndPoint})
-					return checkClockClassInMetrics(buf.String(), "7") || checkClockClassInMetrics(buf.String(), "248")
+					return checkClockClassInMetrics(buf.String(), "7")
 				}, pkg.TimeoutIn5Minutes, 2*time.Second).Should(BeTrue(),
-					"Expected GM clock class to degrade before collecting events")
+					"Expected GM clock class to reach CC7 (holdover) before collecting events")
 
 				events := getGMEvents(subs.GNSS, subs.CLOCKCLASS, subs.LOCKSTATE, 30*time.Second)
 				fmt.Fprintf(GinkgoWriter, "TGMBC GM loss events: %v\n", events)
@@ -3490,12 +3475,12 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 				verifyEvent(events[ptpEvent.PtpStateChange], ptpEvent.HOLDOVER)
 				stopMonitor(term)
 
-				By("Verifying BC parent gm.ClockClass cascades to CC7/CC248 via PMC")
+				By("Verifying BC parent gm.ClockClass cascades to CC7 via PMC")
 				Eventually(func() bool {
 					cc, err := ptptesthelper.GetClockClassViaPMC(fullConfig, "/var/run/ptp4l.0.config")
-					return err == nil && (cc == int(fbprotocol.ClockClass7) || cc == ClockClassFreerun)
+					return err == nil && cc == int(fbprotocol.ClockClass7)
 				}, pkg.TimeoutIn10Minutes, 2*time.Second).Should(BeTrue(),
-					"Expected BC parent gm.ClockClass to cascade-degrade after GM holdover event")
+					"Expected BC parent gm.ClockClass to cascade to CC7 after GM holdover event")
 
 				term2, err2 := event.MonitorPodLogsRegex()
 				defer func() { stopMonitor(term2) }()
@@ -4684,20 +4669,19 @@ func ensureGMPtpConfigRestored() {
 	}
 }
 
-// requireDiscoveryAfterRefresh skips when a forced rediscovery lost PtpConfigs or
-// the clock-under-test pod (common when parallel BeforeSuite clean.All races serial).
+// requireDiscoveryAfterRefresh fails when a forced rediscovery lost PtpConfigs or
+// the clock-under-test pod (e.g. wiped mid-run). Soft Skip hid those regressions.
 func requireDiscoveryAfterRefresh(cfg *testconfig.TestConfig, wantMode testconfig.PTPMode) {
-	if cfg.Status != testconfig.DiscoverySuccessStatus {
-		Skip(fmt.Sprintf("PTP discovery failed after refresh (status=%s, mode=%s); "+
+	Expect(cfg.Status).To(Equal(testconfig.DiscoverySuccessStatus),
+		fmt.Sprintf("PTP discovery failed after refresh (status=%s, mode=%s); "+
 			"PtpConfigs may have been wiped by a concurrent suite",
 			cfg.Status, cfg.PtpModeDiscovered))
-	}
-	if cfg.DiscoveredClockUnderTestPod == nil {
-		Skip("DiscoveredClockUnderTestPod is nil after refresh")
-	}
-	if wantMode != testconfig.None && cfg.PtpModeDiscovered != wantMode {
-		Skip(fmt.Sprintf("discovered mode %s != required %s after refresh",
-			cfg.PtpModeDiscovered, wantMode))
+	Expect(cfg.DiscoveredClockUnderTestPod).NotTo(BeNil(),
+		"DiscoveredClockUnderTestPod is nil after refresh")
+	if wantMode != testconfig.None {
+		Expect(cfg.PtpModeDiscovered).To(Equal(wantMode),
+			fmt.Sprintf("discovered mode %s != required %s after refresh",
+				cfg.PtpModeDiscovered, wantMode))
 	}
 }
 
@@ -5000,7 +4984,7 @@ func anyClockClassDifferent(fullConfig testconfig.TestConfig, excludedClass stri
 // GNSS→ts2phc→DPLL→PMC pipeline. Downstream OC/BC profiles that still use the
 // default clock_class_threshold of 7 reject GMs with class > 7, so we must wait
 // before any slave sync assertion. (TGMBC BC configs raise the threshold so
-// cascading holdover can observe CC7/CC248.)
+// cascading holdover can observe CC7.)
 // The function is a no-op when there is no WPC GM in the topology.
 func waitForWPCGMReady(fullConfig testconfig.TestConfig) {
 	if fullConfig.PtpModeDiscovered != testconfig.TelcoGMOC &&

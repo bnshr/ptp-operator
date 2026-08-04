@@ -27,14 +27,14 @@ func TestConfigIsPhc2SysHa(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "HA without phc2sysOpts (netdevsim omit)",
+			name: "HA without phc2sysOpts is not HA",
 			profile: ptpv1.PtpProfile{
 				Name:        &name,
 				Ptp4lOpts:   &emptyPtp4l,
 				Phc2sysOpts: nil,
 				PtpSettings: map[string]string{"haProfiles": "test-bc-master1,test-bc-master2"},
 			},
-			want: true,
+			want: false,
 		},
 		{
 			name: "missing haProfiles",
@@ -51,7 +51,7 @@ func TestConfigIsPhc2SysHa(t *testing.T) {
 			profile: ptpv1.PtpProfile{
 				Name:        &name,
 				Ptp4lOpts:   &emptyPtp4l,
-				Phc2sysOpts: nil,
+				Phc2sysOpts: &phc2sysOpts,
 				PtpSettings: map[string]string{"haProfiles": "test-bc-master1"},
 			},
 			want: false,
@@ -61,7 +61,7 @@ func TestConfigIsPhc2SysHa(t *testing.T) {
 			profile: ptpv1.PtpProfile{
 				Name:        &name,
 				Ptp4lOpts:   func() *string { s := "-2"; return &s }(),
-				Phc2sysOpts: nil,
+				Phc2sysOpts: &phc2sysOpts,
 				PtpSettings: map[string]string{"haProfiles": "test-bc-master1,test-bc-master2"},
 			},
 			want: false,

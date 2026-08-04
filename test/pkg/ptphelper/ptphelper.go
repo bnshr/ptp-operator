@@ -942,15 +942,12 @@ func hasHaProfiles(ptpSettings map[string]string) bool {
 	return ptpSettings != nil && ptpSettings["haProfiles"] != "" && len(strings.Split(ptpSettings["haProfiles"], ",")) > 1
 }
 
-// Checks for DualNIC BC HA.
-// Phc2sysOpts may be nil in netdevsim/Kind when omitPhc2sysInSimulation strips them
-// to avoid a shared-host CLOCK_REALTIME feedback loop; haProfiles + empty ptp4lOpts
-// are still sufficient to identify the HA profile.
+// Checks for DualNIC BC HA
 func ConfigIsPhc2SysHa(config *ptpv1.PtpConfig) bool {
 	logrus.Infof("Checking if config %s is Phc2Sys HA", config.Name)
 	for _, profile := range config.Spec.Profile {
-		if profile.Ptp4lOpts != nil && *profile.Ptp4lOpts == "" && hasHaProfiles(profile.PtpSettings) {
-			logrus.Infof("Config %s is Phc2Sys HA (phc2sysOpts set=%v)", config.Name, profile.Phc2sysOpts != nil)
+		if profile.Phc2sysOpts != nil && profile.Ptp4lOpts != nil && *profile.Ptp4lOpts == "" && hasHaProfiles(profile.PtpSettings) {
+			logrus.Infof("Config %s is Phc2Sys HA", config.Name)
 			return true
 		}
 	}

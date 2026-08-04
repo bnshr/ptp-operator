@@ -1347,13 +1347,11 @@ func CreatePtpConfigBC(policyName, nodeName, ifMasterName, ifSlaveName string, p
 	}
 
 	bcConfig := GetPtp4lConfigWithAuth(BasePtp4lConfig) + "\nboundary_clock_jbod 1\ngmCapable 0"
-	// TGMBC cascading-holdover and DualNicBC topologies need the BC to accept
-	// upstream announces when the GM/T-GM clock class is above the default
-	// threshold of 7 ("Master clock quality received is greater than
-	// configured, ignoring master!"). linuxptp rejects values > 248 for this
-	// option.
-	switch GlobalConfig.PtpModeDesired {
-	case TelcoGMBC, DualNICBoundaryClock, DualNICBoundaryClockHA:
+	// TGMBC cascading-holdover needs the BC to accept upstream announces when the
+	// GM clock class is above the default threshold of 7 ("Master clock quality
+	// received is greater than configured, ignoring master!"). DualNicBC/HA keep
+	// the default 7 so freerun-class GMs are not silently accepted.
+	if GlobalConfig.PtpModeDesired == TelcoGMBC {
 		bcConfig = strings.Replace(bcConfig, "clock_class_threshold 7", "clock_class_threshold 248", 1)
 	}
 	bcConfig = AddAuthSettings(AddInterface(bcConfig, ifSlaveName, 0))
@@ -2498,13 +2496,6 @@ func discoverMode(ptpConfigClockUnderTest []*ptpv1.PtpConfig) {
 		case 2:
 			if numPhc2SysHa == 1 {
 				GlobalConfig.PtpModeDiscovered = DualNICBoundaryClockHA
-				GlobalConfig.Status = DiscoverySuccessStatus
-			} else if ptphelper.IsGnssSimConfigured() {
-				// In Kind/netdevsim, omitPhc2sysInSimulation strips Phc2sysOpts from
-				// the primary BC, so both BCs look secondary. Without an HA profile
-				// this is still DualNICBC.
-				logrus.Info("netdevsim/Kind: treating dual secondary BCs without HA as DualNICBC (phc2sys omitted)")
-				GlobalConfig.PtpModeDiscovered = DualNICBoundaryClock
 				GlobalConfig.Status = DiscoverySuccessStatus
 			}
 		}
