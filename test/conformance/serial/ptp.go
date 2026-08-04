@@ -2983,7 +2983,7 @@ var _ = Describe("["+strings.ToLower(DesiredMode.String())+"-serial]", Serial, f
 
 				gmPod := getGMPod()
 
-				// phc2sys is omitted in Kind/netdevsim (shared host CLOCK_REALTIME).
+				// phc2sys -r is stripped in Kind/netdevsim (shared host CLOCK_REALTIME).
 				By("checking sim GM required processes status (ts2phc, ptp4l)", func() {
 					processesArr := [...]string{"ts2phc", "ptp4l"}
 					for _, val := range processesArr {
