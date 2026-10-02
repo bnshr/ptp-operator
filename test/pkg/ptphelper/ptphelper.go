@@ -165,6 +165,19 @@ func getClockIDViaPMC(pod *corev1.Pod, configFile, field string) (string, error)
 	return matches[1], nil
 }
 
+// ptp4lLogTagPattern matches the bracketed ptp4l message tag.
+// Parsed logs use "ptp4l.0.config:{level}". The /var/run fallback returns
+// "ptp4l.0.config", while ptp4l prints "[ptp4l.0.config:5]".
+func ptp4lLogTagPattern(logID string) string {
+	if strings.Contains(logID, "{level}") {
+		return strings.Replace(logID, "{level}", `\d+`, 1)
+	}
+	if strings.Contains(logID, ":") {
+		return logID
+	}
+	return regexp.QuoteMeta(logID) + `(?::\d+)?`
+}
+
 func GetClockIDMaster(ptpConfigName string, profileName string, label *string, nodeName *string, isGM bool) (string, error) {
 	const clockIDGMRegex = `(?m)\[%s\] selected local clock (.*) as best master`
 	const clockIDBCRegex = `(?m)\[%s\] selected best master clock (.*)`
@@ -178,9 +191,7 @@ func GetClockIDMaster(ptpConfigName string, profileName string, label *string, n
 		return "", err
 	}
 	configFile := configFileFromLogID(logID)
-	if strings.Contains(logID, "level") {
-		logID = strings.Replace(logID, "{level}", "\\d+", 1)
-	}
+	logID = ptp4lLogTagPattern(logID)
 	pod, err := findMatchingPod(label, nodeName)
 	if err != nil {
 		return "", err
@@ -204,9 +215,7 @@ func GetClockIDForeign(ptpConfigName string, profileName string, label *string, 
 		return "", err
 	}
 	configFile := configFileFromLogID(logID)
-	if strings.Contains(logID, "level") {
-		logID = strings.Replace(logID, "{level}", "\\d+", 1)
-	}
+	logID = ptp4lLogTagPattern(logID)
 	pod, err := findMatchingPod(label, nodeName)
 	if err != nil {
 		return "", err
@@ -219,17 +228,9 @@ func GetClockIDForeign(ptpConfigName string, profileName string, label *string, 
 		return matches[len(matches)-1][clockIDForeignIndex], nil
 	}
 	logrus.Infof("GetClockIDForeign: log parsing failed for %s, falling back to pmc: %v", profileName, err)
-	// linuxptp pmc prints "parentPortIdentity <clockId>-<port>", not
-	// "parentPortIdentity.clockIdentity". Strip the port suffix for callers
-	// that compare against grandmasterIdentity.
-	id, pmcErr := getClockIDViaPMC(pod, configFile, "parentPortIdentity")
-	if pmcErr != nil {
-		return "", pmcErr
-	}
-	if dash := strings.LastIndex(id, "-"); dash > 0 {
-		id = id[:dash]
-	}
-	return id, nil
+	// "selected best master clock" is the grandmaster identity. Behind a
+	// boundary clock, parentPortIdentity is the BC port and does not match.
+	return getClockIDViaPMC(pod, configFile, "grandmasterIdentity")
 }
 
 // WaitForClockIDForeign searches the slave's log stream for a specific expected
@@ -241,9 +242,7 @@ func WaitForClockIDForeign(ptpConfigName string, profileName string, label *stri
 	if err != nil {
 		return fmt.Errorf("could not get profile log ID: %w", err)
 	}
-	if strings.Contains(logID, "level") {
-		logID = strings.Replace(logID, "{level}", "\\d+", 1)
-	}
+	logID = ptp4lLogTagPattern(logID)
 	pod, err := findMatchingPod(label, nodeName)
 	if err != nil {
 		return fmt.Errorf("no matching pod found for profile %s: %w", profileName, err)
@@ -1008,6 +1007,7 @@ func GetProfileName(config *ptpv1.PtpConfig, receiverOnly bool) (string, error) 
 		}
 		switch *profile.Name {
 		case pkg.PtpGrandMasterPolicyName,
+			pkg.PtpWPCGrandMasterPolicyName,
 			pkg.PtpBcMaster1PolicyName,
 			pkg.PtpBcMaster2PolicyName,
 			pkg.PtpSlave1PolicyName,

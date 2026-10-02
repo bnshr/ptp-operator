@@ -225,11 +225,17 @@ func GetPodLogsRegex(namespace string, podName string, containerName, regex stri
 	} else {
 		logContent, readErr := io.ReadAll(snapStream)
 		snapStream.Close()
-		if readErr == nil && len(logContent) > 0 {
+		// A large daemon log can hit the snapshot deadline after the startup
+		// lines (Profile Name, Ptp4lConf) have already been read. Search that
+		// prefix before discarding it.
+		if len(logContent) > 0 {
 			matches = r.FindAllStringSubmatch(string(logContent), -1)
 			if len(matches) > 0 {
 				return matches, nil
 			}
+		}
+		if readErr != nil {
+			logrus.Warnf("log snapshot for %s/%s container=%s incomplete: %v", namespace, podName, containerName, readErr)
 		}
 	}
 
